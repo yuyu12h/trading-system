@@ -1,0 +1,11 @@
+mcp/
+node_modules/
+*.log
+find-skills/
+pine_debug.js
+pine_debug_old.js
+cdp_test.js
+cdp_test2.js
+inject_pine_direct.js
+inject_via_clipboard.js
+youtube_cookies.txt

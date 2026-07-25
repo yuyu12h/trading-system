@@ -1,0 +1,111 @@
+//@version=5
+indicator("K线形态识别", overlay=true, max_labels_count=500)
+
+// ============================================================
+// 输入：显示开关
+// ============================================================
+showStrongCandle = input.bool(true, "显示强势K线", group="显示控制")
+showPinbar       = input.bool(true, "显示Pinbar",  group="显示控制")
+showDoji         = input.bool(true, "显示十字星",   group="显示控制")
+
+// ============================================================
+// 输入：强势K线参数
+// ============================================================
+scLookback          = input.int(100, "历史参考周期", minval=10, group="强势K线参数")
+scBodyMult          = input.float(3.0, "实体倍数", step=0.1, group="强势K线参数")
+scWickRatio         = input.float(0.3, "最大影线/实体比", step=0.05, group="强势K线参数")
+scBreakoutLookback  = input.int(3, "突破确认周期", minval=1, group="强势K线参数")
+
+// ============================================================
+// 输入：Pinbar参数
+// ============================================================
+pbBodyMult = input.float(2.0, "影线/实体倍数", step=0.1, group="Pinbar参数")
+pbWickDiv  = input.float(3.0, "短影线/长影线分母", step=0.5, group="Pinbar参数")
+
+// ============================================================
+// 输入：十字星参数
+// ============================================================
+djBodyRatio = input.float(0.1, "最大实体/全幅比", step=0.02, group="十字星参数")
+djWickMult  = input.float(2.0, "最大影线长度比", step=0.1, group="十字星参数")
+
+// ============================================================
+// K线基础数据
+// ============================================================
+body      = math.abs(close - open)
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+fullRange = high - low
+isBullish = close > open
+
+// ============================================================
+// 强势K线识别
+// 条件：实体 > 过去N根平均实体 × 倍数，影线占比 ≤ 阈值
+//       且阳线收盘突破前N根高点 / 阴线收盘跌破前N根低点
+// ============================================================
+avgBody = ta.sma(body, scLookback)
+isStrongCandleBody = body > 0 and body >= avgBody * scBodyMult and (upperWick + lowerWick) / body <= scWickRatio
+
+breakoutHigh = ta.highest(high[1], scBreakoutLookback)
+breakoutLow  = ta.lowest(low[1],  scBreakoutLookback)
+
+isStrongBull = isStrongCandleBody and isBullish and close >= breakoutHigh
+isStrongBear = isStrongCandleBody and not isBullish and close <= breakoutLow
+
+// ============================================================
+// Pinbar识别
+// ============================================================
+isBullishPinbar = body > 0 and lowerWick >= pbBodyMult * body and upperWick <= lowerWick / pbWickDiv
+isBearishPinbar = body > 0 and upperWick >= pbBodyMult * body and lowerWick <= upperWick / pbWickDiv
+
+// ============================================================
+// 十字星识别
+// ============================================================
+isDoji = fullRange > 0 and body <= fullRange * djBodyRatio and math.max(upperWick, lowerWick) <= math.min(upperWick, lowerWick) * djWickMult
+
+// ============================================================
+// 信号
+// ============================================================
+sigStrongBull = showStrongCandle and isStrongBull
+sigStrongBear = showStrongCandle and isStrongBear
+sigBullPinbar = showPinbar and isBullishPinbar
+sigBearPinbar = showPinbar and isBearishPinbar
+sigDoji       = showDoji and isDoji
+
+// ============================================================
+// 箭头标记（plotshape）
+// ============================================================
+plotshape(sigStrongBull, style=shape.arrowup,   location=location.belowbar, color=color.new(#1A73E8, 0), size=size.tiny, title="强势阳线")
+plotshape(sigStrongBear, style=shape.arrowdown, location=location.abovebar, color=color.new(#E84118, 0), size=size.tiny, title="强势阴线")
+plotshape(sigBullPinbar, style=shape.arrowup,   location=location.belowbar, color=color.new(#00C853, 0), size=size.tiny, title="看涨Pinbar")
+plotshape(sigBearPinbar, style=shape.arrowdown, location=location.abovebar, color=color.new(#FF1744, 0), size=size.tiny, title="看跌Pinbar")
+plotshape(sigDoji,       style=shape.diamond,   location=location.abovebar, color=color.new(#FF6D00, 0), size=size.tiny, title="十字星")
+
+// ============================================================
+// 文字标签（仅在已完成K线上绘制，避免实时K线闪烁）
+// ============================================================
+if barstate.isconfirmed
+    // --- 强势阳线 ---
+    if sigStrongBull
+        label.new(bar_index, high, text=" 强势阳线 ", style=label.style_label_down,
+                  textcolor=color.black, color=color.new(#1A73E8, 60), size=size.normal)
+
+    // --- 强势阴线 ---
+    if sigStrongBear
+        label.new(bar_index, low, text=" 强势阴线 ", style=label.style_label_up,
+                  textcolor=color.black, color=color.new(#E84118, 60), size=size.normal)
+
+    // --- 看涨Pinbar ---
+    if sigBullPinbar
+        label.new(bar_index, high, text=" 看涨Pinbar ", style=label.style_label_down,
+                  textcolor=color.black, color=color.new(#00C853, 60), size=size.normal)
+
+    // --- 看跌Pinbar ---
+    if sigBearPinbar
+        label.new(bar_index, low, text=" 看跌Pinbar ", style=label.style_label_up,
+                  textcolor=color.black, color=color.new(#FF1744, 60), size=size.normal)
+
+    // --- 十字星 ---
+    if sigDoji
+        label.new(bar_index, high + fullRange * 0.3, text=" 十字星 ",
+                  style=label.style_label_center, textcolor=color.black,
+                  color=color.new(#FF6D00, 60), size=size.normal)
