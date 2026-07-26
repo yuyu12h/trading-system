@@ -1,0 +1,295 @@
+//@version=5
+indicator("K线组合识别", overlay=true, max_labels_count=500)
+
+// ============================================================
+// 输入：显示开关
+// ============================================================
+showEngulfing   = input.bool(true, "显示吞没形态",     group="显示控制")
+showStar        = input.bool(true, "显示早晨/黄昏之星", group="显示控制")
+showHarami      = input.bool(true, "显示孕线",          group="显示控制")
+show4BarRev     = input.bool(true, "显示四K反转",       group="显示控制")
+
+// ============================================================
+// 输入：吞没形态参数
+// ============================================================
+egBodyMult      = input.float(1.5, "最小吞没倍数(相对前一根)", step=0.1, group="吞没形态参数")
+egBodyRatio     = input.float(0.5, "最小实体效率(body/range)", step=0.05, group="吞没形态参数")
+
+// ============================================================
+// 输入：犹豫K线参数
+// ============================================================
+hzBodyRatio     = input.float(0.3,  "最大实体/全幅比",      step=0.05, group="犹豫K线参数")
+hzWickDiffRatio = input.float(0.5,  "最大上下影线差距比",    step=0.1,  group="犹豫K线参数")
+hzNarrowFactor  = input.float(0.5,  "窄幅阈值(相对平均波幅)", step=0.1,  group="犹豫K线参数")
+hzLookback      = input.int(20,     "窄幅参考周期",          minval=5,  group="犹豫K线参数")
+
+// ============================================================
+// 输入：母线（孕线）强势参数
+// ============================================================
+mpBodyMult      = input.float(2.0, "最小实体倍数(相对平均)", step=0.1, group="母线参数")
+mpLookback      = input.int(100,   "平均实体参考周期",        minval=10, group="母线参数")
+mpWickRatio     = input.float(0.5, "最大影线/实体比",        step=0.05, group="母线参数")
+
+// ============================================================
+// 输入：孕线参数
+// ============================================================
+hpChildBodyRatio = input.float(0.5, "子线最大实体比(相对母线)", step=0.05, group="孕线参数")
+
+// ============================================================
+// 输入：早晨/黄昏之星参数
+// ============================================================
+msBodyRangeLo   = input.float(0.8,  "Bar3/Bar1实体比下限", step=0.05, group="早晨/黄昏之星参数")
+msBodyRangeHi   = input.float(1.25, "Bar3/Bar1实体比上限", step=0.05, group="早晨/黄昏之星参数")
+msPenetration   = input.float(0.5,  "最小穿透比例(相对Bar1实体)", step=0.05, group="早晨/黄昏之星参数")
+msBar3BodyRatio = input.float(0.6,  "Bar3最小实体效率(body/range)", step=0.05, group="早晨/黄昏之星参数")
+
+// ============================================================
+// 输入：四K反转参数
+// ============================================================
+frLevelATRMult  = input.float(0.3, "价格接近阈值(×ATR)", step=0.05, group="四K反转参数")
+frAtrLength     = input.int(14,    "ATR周期",             minval=5,  group="四K反转参数")
+frBodyMult      = input.float(1.5, "第一四根/中间最小实体倍数", step=0.1, group="四K反转参数")
+
+// ============================================================
+// K线基础数据
+// ============================================================
+bodyVal    = math.abs(close - open)
+upperWick  = high - math.max(open, close)
+lowerWick  = math.min(open, close) - low
+fullRange  = high - low
+avgRange   = ta.sma(fullRange, hzLookback)
+isBullish  = close > open
+avgBody    = ta.sma(bodyVal, mpLookback)
+atrVal     = ta.atr(frAtrLength)
+
+// ============================================================
+// 犹豫K线判断函数
+// 两种犹豫形态满足其一即判定为犹豫K线：
+//   1) Spinning Top型 — 小实体 + 实体在中间 + 上下影线均衡
+//   2) 窄幅型 — 整根K线波动幅度远小于平均水平
+// ============================================================
+hesitation(_body, _upper, _lower, _range, _avgRange) =>
+    // 条件1：Spinning Top型 — 小实体 + 上下影线均衡
+    wickBalanced = math.max(_upper, _lower) > 0 ? (math.abs(_upper - _lower) / math.max(_upper, _lower)) <= hzWickDiffRatio : false
+    cond1 = _body > 0 and _body <= _range * hzBodyRatio and wickBalanced
+    // 条件2：窄幅型 — 全幅 ≤ 平均波幅 × hzNarrowFactor
+    cond2 = _range <= _avgRange * hzNarrowFactor
+    cond1 or cond2
+
+// ============================================================
+// 母线强势判断（用于孕线）
+//   实体 ≥ 平均实体 × mpBodyMult
+//   影线/实体 ≤ mpWickRatio（实体主导）
+// ============================================================
+isStrongMother(_body, _upper, _lower, _avgBody) =>
+    _body > 0 and _body >= _avgBody * mpBodyMult and (_upper + _lower) / _body <= mpWickRatio
+
+// ============================================================
+// 1. 吞没形态（2根K线）
+// ============================================================
+// 看涨吞没: Bar1阴线 → Bar2阳线
+//   Bar2收盘 ≥ Bar1最高价（吞实体+上影线）
+//   Bar2开盘 ≤ Bar1收盘（在Bar1实体内开盘）
+engulfingBull = showEngulfing and not isBullish[1] and isBullish and close >= high[1] and open <= close[1] and
+   bodyVal >= bodyVal[1] * egBodyMult and        // 吞没K线实体 ≥ 前一根 × 倍数
+   bodyVal >= fullRange * egBodyRatio               // 吞没K线实体效率
+
+// 看跌吞没: Bar1阳线 → Bar2阴线
+//   Bar2收盘 ≤ Bar1最低价（吞实体+下影线）
+//   Bar2开盘 ≥ Bar1收盘（在Bar1实体内开盘）
+engulfingBear = showEngulfing and isBullish[1] and not isBullish and close <= low[1] and open >= close[1] and
+   bodyVal >= bodyVal[1] * egBodyMult and        // 吞没K线实体 ≥ 前一根 × 倍数
+   bodyVal >= fullRange * egBodyRatio               // 吞没K线实体效率
+
+// ============================================================
+// 2. 早晨之星 / 黄昏之星（3根K线）
+//   Bar1 = [2], Bar2 = [1], Bar3 = 当前K线
+// ============================================================
+// --- 提取Bar1和Bar2的数据 ---
+b1Body = bodyVal[2]
+b1Up   = upperWick[2]
+b1Lo   = lowerWick[2]
+b1Rng  = fullRange[2]
+b1AvgR = avgRange[2]
+
+b2Body = bodyVal[1]
+b2Up   = upperWick[1]
+b2Lo   = lowerWick[1]
+b2Rng  = fullRange[1]
+b2AvgR = avgRange[1]
+
+// 早晨之星:
+//   Bar1: 阴线 + 非犹豫
+//   Bar2: 犹豫K线 + 实体小于Bar1
+//   Bar3: 阳线 + 实体≈Bar1(0.8~1.25)
+//         + 开盘≤Bar2收盘 + 收盘≥Bar2最高价
+//         + 收盘≥Bar1收盘 + Bar1实体×50%（穿透确认）
+isMorningStar = showStar and
+   not isBullish[2] and                          // Bar1阴线
+   not hesitation(b1Body, b1Up, b1Lo, b1Rng, b1AvgR) and // Bar1非犹豫
+   hesitation(b2Body, b2Up, b2Lo, b2Rng, b2AvgR) and    // Bar2犹豫
+   b2Body < b1Body and                                    // Bar2实体小于Bar1
+   isBullish and                                          // Bar3阳线
+   bodyVal >= b1Body * msBodyRangeLo and                  // 实体大小下限
+   bodyVal <= b1Body * msBodyRangeHi and                  // 实体大小上限
+   open <= close[1] and                                   // 开盘≤Bar2收盘
+   close >= high[1] and                                   // 收盘≥Bar2最高价
+   close >= close[2] + b1Body * msPenetration and         // 穿透Bar1实体50%
+   bodyVal >= fullRange * msBar3BodyRatio                 // Bar3实体效率
+
+// 黄昏之星:
+//   Bar1: 阳线 + 非犹豫
+//   Bar2: 犹豫K线 + 实体小于Bar1
+//   Bar3: 阴线 + 实体≈Bar1(0.8~1.25)
+//         + 开盘≥Bar2开盘 + 收盘≤Bar2最低价
+//         + 收盘≤Bar1收盘 - Bar1实体×50%（穿透确认）
+isEveningStar = showStar and
+   isBullish[2] and                                        // Bar1阳线
+   not hesitation(b1Body, b1Up, b1Lo, b1Rng, b1AvgR) and  // Bar1非犹豫
+   hesitation(b2Body, b2Up, b2Lo, b2Rng, b2AvgR) and     // Bar2犹豫
+   b2Body < b1Body and                                    // Bar2实体小于Bar1
+   not isBullish and                                      // Bar3阴线
+   bodyVal >= b1Body * msBodyRangeLo and                  // 实体大小下限
+   bodyVal <= b1Body * msBodyRangeHi and                  // 实体大小上限
+   open >= open[1] and                                    // 开盘≥Bar2开盘
+   close <= low[1] and                                    // 收盘≤Bar2最低价
+   close <= close[2] - b1Body * msPenetration and         // 穿透Bar1实体50%
+   bodyVal >= fullRange * msBar3BodyRatio                 // Bar3实体效率
+
+// ============================================================
+// 3. 孕线形态（2根K线）
+//   Bar1(母线)=[1], Bar2(孕线)=当前K线
+// ============================================================
+isHarami = showHarami and
+   isStrongMother(bodyVal[1], upperWick[1], lowerWick[1], avgBody[1]) and  // Bar1强势母线
+   high <= high[1] and low >= low[1] and                   // 被母线完整包住
+   bodyVal <= bodyVal[1] * hpChildBodyRatio                // 子线实体 ≤ 母线 × 比例
+
+// ============================================================
+// 4. 四K反转（4根K线）
+//   Bar1=[3], Bar2=[2], Bar3=[1], Bar4=当前K线
+//   所有K线均不能是犹豫K线
+// ============================================================
+// --- 提取四根K线数据 ---
+f1Body = bodyVal[3]
+f1Up   = upperWick[3]
+f1Lo   = lowerWick[3]
+f1Rng  = fullRange[3]
+f1AvgR = avgRange[3]
+
+f2Body = bodyVal[2]
+f2Up   = upperWick[2]
+f2Lo   = lowerWick[2]
+f2Rng  = fullRange[2]
+f2AvgR = avgRange[2]
+
+f3Body = bodyVal[1]
+f3Up   = upperWick[1]
+f3Lo   = lowerWick[1]
+f3Rng  = fullRange[1]
+f3AvgR = avgRange[1]
+
+f4Body = bodyVal
+f4Up   = upperWick
+f4Lo   = lowerWick
+f4Rng  = fullRange
+f4AvgR = avgRange
+
+// 四根均非犹豫
+allDecisive = not hesitation(f1Body, f1Up, f1Lo, f1Rng, f1AvgR) and
+   not hesitation(f2Body, f2Up, f2Lo, f2Rng, f2AvgR) and
+   not hesitation(f3Body, f3Up, f3Lo, f3Rng, f3AvgR) and
+   not hesitation(f4Body, f4Up, f4Lo, f4Rng, f4AvgR)
+
+// 价格接近: C1 ≈ O2 ≈ C3 ≈ O4 的最大差距 ≤ ATR × frLevelATRMult
+levelHi  = math.max(close[3], open[2], close[1], open)
+levelLo  = math.min(close[3], open[2], close[1], open)
+levelOk  = (levelHi - levelLo) <= atrVal * frLevelATRMult
+
+// 看跌四K反转:
+//   Bar1阳线 + 4根均非犹豫
+//   O1 < L2, O1 < L3, C4 < L2, C4 < L3
+//   C1≈O2≈C3≈O4
+//   C4 < L1（最好但不是必须）
+bear4Rev = show4BarRev and isBullish[3] and
+   allDecisive and
+   bodyVal[3] >= f2Body * frBodyMult and bodyVal[3] >= f3Body * frBodyMult and  // Bar1 ≥ 中间×倍数
+   open[3] < low[2] and open[3] < low[1] and
+   close < low[2] and close < low[1] and
+   bodyVal >= f2Body * frBodyMult and bodyVal >= f3Body * frBodyMult and  // Bar4 ≥ 中间×倍数
+   levelOk
+
+// 看涨四K反转:
+//   Bar1阴线 + 4根均非犹豫
+//   O1 > H2, O1 > H3, C4 > H2, C4 > H3
+//   C1≈O2≈C3≈O4
+//   C4 > H1（最好但不是必须）
+bull4Rev = show4BarRev and not isBullish[3] and
+   allDecisive and
+   bodyVal[3] >= f2Body * frBodyMult and bodyVal[3] >= f3Body * frBodyMult and  // Bar1 ≥ 中间×倍数
+   open[3] > high[2] and open[3] > high[1] and
+   close > high[2] and close > high[1] and
+   bodyVal >= f2Body * frBodyMult and bodyVal >= f3Body * frBodyMult and  // Bar4 ≥ 中间×倍数
+   levelOk
+
+// ============================================================
+// 信号整合
+// ============================================================
+sigEngulfBull = showEngulfing and engulfingBull
+sigEngulfBear = showEngulfing and engulfingBear
+sigMorning    = showStar and isMorningStar
+sigEvening    = showStar and isEveningStar
+sigHarami     = showHarami and isHarami
+sigBear4Rev   = show4BarRev and bear4Rev
+sigBull4Rev   = show4BarRev and bull4Rev
+
+// ============================================================
+// 箭头标记（plotshape）
+// ============================================================
+plotshape(sigEngulfBull, style=shape.arrowup,   location=location.belowbar, color=color.new(#1A73E8, 0), size=size.tiny, title="看涨吞没")
+plotshape(sigEngulfBear, style=shape.arrowdown, location=location.abovebar, color=color.new(#E84118, 0), size=size.tiny, title="看跌吞没")
+plotshape(sigMorning,    style=shape.arrowup,   location=location.belowbar, color=color.new(#00C853, 0), size=size.tiny, title="早晨之星")
+plotshape(sigEvening,    style=shape.arrowdown, location=location.abovebar, color=color.new(#FF1744, 0), size=size.tiny, title="黄昏之星")
+plotshape(sigHarami,     style=shape.diamond,   location=location.abovebar, color=color.new(#FF6D00, 0), size=size.tiny, title="孕线")
+plotshape(sigBull4Rev,   style=shape.arrowup,   location=location.belowbar, color=color.new(#7C4DFF, 0), size=size.tiny, title="四K看涨")
+plotshape(sigBear4Rev,   style=shape.arrowdown, location=location.abovebar, color=color.new(#FF5722, 0), size=size.tiny, title="四K看跌")
+
+// ============================================================
+// 文字标签（仅在已完成K线上绘制，避免实时K线闪烁）
+// ============================================================
+if barstate.isconfirmed
+    // --- 看涨吞没 ---
+    if sigEngulfBull
+        label.new(bar_index, high, text=" 看涨吞没 ", style=label.style_label_down,
+                  textcolor=color.black, color=color.new(#1A73E8, 60), size=size.normal)
+
+    // --- 看跌吞没 ---
+    if sigEngulfBear
+        label.new(bar_index, low, text=" 看跌吞没 ", style=label.style_label_up,
+                  textcolor=color.black, color=color.new(#E84118, 60), size=size.normal)
+
+    // --- 早晨之星 ---
+    if sigMorning
+        label.new(bar_index, high, text=" 早晨之星 ", style=label.style_label_down,
+                  textcolor=color.black, color=color.new(#00C853, 60), size=size.normal)
+
+    // --- 黄昏之星 ---
+    if sigEvening
+        label.new(bar_index, low, text=" 黄昏之星 ", style=label.style_label_up,
+                  textcolor=color.black, color=color.new(#FF1744, 60), size=size.normal)
+
+    // --- 孕线 ---
+    if sigHarami
+        label.new(bar_index, high + fullRange * 0.3, text=" 孕线 ",
+                  style=label.style_label_center, textcolor=color.black,
+                  color=color.new(#FF6D00, 60), size=size.normal)
+
+    // --- 看涨四K反转 ---
+    if sigBull4Rev
+        label.new(bar_index, high, text=" 四K看涨 ", style=label.style_label_down,
+                  textcolor=color.black, color=color.new(#7C4DFF, 60), size=size.normal)
+
+    // --- 看跌四K反转 ---
+    if sigBear4Rev
+        label.new(bar_index, low, text=" 四K看跌 ", style=label.style_label_up,
+                  textcolor=color.black, color=color.new(#FF5722, 60), size=size.normal)
