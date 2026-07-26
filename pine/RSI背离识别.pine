@@ -1,0 +1,212 @@
+//@version=5
+indicator("RSI背离识别", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ============================================================
+// 输入：显示开关
+// ============================================================
+showRegBearish  = input.bool(true, "常规顶背离(看跌)",  group="背离类型")
+showRegBullish  = input.bool(true, "常规底背离(看涨)",  group="背离类型")
+showHidBearish  = input.bool(true, "隐藏顶背离(看跌)",  group="背离类型")
+showHidBullish  = input.bool(true, "隐藏底背离(看涨)",  group="背离类型")
+
+// ============================================================
+// 输入：RSI参数
+// ============================================================
+rsiLength       = input.int(14,   "RSI周期",     minval=2,  group="RSI参数")
+rsiOverbought   = input.int(60,   "看跌背离最低RSI", minval=50, group="RSI参数")
+rsiOversold     = input.int(40,   "看涨背离最高RSI", minval=1,  group="RSI参数")
+
+// ============================================================
+// 输入：摆动点参数
+// ============================================================
+leftBars        = input.int(5,     "摆动点左侧K线数", minval=1,  group="摆动点参数")
+rightBars       = input.int(3,     "摆动点右侧K线数", minval=1,  group="摆动点参数")
+rsiOffset       = input.int(2,     "RSI匹配偏移(±K线)", minval=0, group="摆动点参数")
+minBarsBW       = input.int(5,     "最小摆动间隔",    minval=1,  group="摆动点参数")
+maxBarsBW       = input.int(60,    "最大摆动间隔",    minval=10, group="摆动点参数")
+
+// ============================================================
+// 输入：确认参数
+// ============================================================
+atrLen          = input.int(14,    "ATR周期",       minval=1, group="确认参数")
+atrMult         = input.float(1.0, "确认幅度(×ATR)", step=0.1, group="确认参数")
+
+// ============================================================
+// K线基础数据
+// ============================================================
+rsi     = ta.rsi(close, rsiLength)
+atrVal  = ta.atr(atrLen)
+
+// ============================================================
+// 摆动点检测
+// ============================================================
+phPrice = ta.pivothigh(high, leftBars, rightBars)
+plPrice = ta.pivotlow(low,   leftBars, rightBars)
+
+// ============================================================
+// 历史摆动点存储
+// ============================================================
+var float[] swHiPrice = array.new_float()
+var float[] swHiRSI   = array.new_float()
+var int[]   swHiBar   = array.new_int()
+
+var float[] swLoPrice = array.new_float()
+var float[] swLoRSI   = array.new_float()
+var int[]   swLoBar   = array.new_int()
+
+// ============================================================
+// 背离记录存储
+//   divType: 0=常规顶背离, 1=常规底背离, 2=隐藏顶背离, 3=隐藏底背离
+// ============================================================
+var int[]   divType     = array.new_int()
+var int[]   divBar      = array.new_int()   // 摆动点B(第二个)的bar_index
+var float[] divPrice    = array.new_float() // 摆动点B的价格
+var float[] divATR      = array.new_float() // 摆动点B时的ATR
+var int[]   divRefBar   = array.new_int()   // 摆动点A(第一个)的bar_index
+var float[] divRefPrice = array.new_float() // 摆动点A的价格
+var bool[]  divDrawn    = array.new_bool()  // 是否已画线
+
+// ============================================================
+// 获取摆动点中心附近 offset 范围内的 RSI 极值
+// ============================================================
+getRSIAtPivot(isHigh) =>
+    val = isHigh ? -1.0 : 999.0
+    for i = 0 to rsiOffset * 2
+        idx = rightBars - rsiOffset + i
+        if idx >= 0
+            val := isHigh ? math.max(val, rsi[idx]) : math.min(val, rsi[idx])
+    val
+
+// ============================================================
+// 将背离记录存入数组
+// ============================================================
+storeDivergence(type, bar, price, atr_, refBar, refPrice) =>
+    array.push(divType, type)
+    array.push(divBar, bar)
+    array.push(divPrice, price)
+    array.push(divATR, atr_)
+    array.push(divRefBar, refBar)
+    array.push(divRefPrice, refPrice)
+    array.push(divDrawn, false)
+
+// ============================================================
+// 画背离线 + 标签
+// ============================================================
+drawDivergence(type, refBar, refPrice, divBar_, divPrice_, yLabel) =>
+    // 颜色和文字
+    col = color.black
+    txt = ""
+    if type == 0
+        col := color.new(#E84118, 0)
+        txt := "顶背离"
+    else if type == 1
+        col := color.new(#00C853, 0)
+        txt := "底背离"
+    else if type == 2
+        col := color.new(#FF6D00, 0)
+        txt := "隐藏顶背离"
+    else
+        col := color.new(#1A73E8, 0)
+        txt := "隐藏底背离"
+
+    // 画价格背离线
+    line.new(refBar, refPrice, divBar_, divPrice_,
+             color=col, width=1, style=line.style_dashed,
+             extend=extend.none)
+
+    // 画标签
+    label.new(divBar_, yLabel, text=txt,
+              textcolor=color.black, color=color.new(col, 60),
+              style=type % 2 == 0 ? label.style_label_up : label.style_label_down,
+              size=size.normal)
+
+// ============================================================
+// 处理新摆动高点
+// ============================================================
+if not na(phPrice)
+    pivotBar = bar_index - rightBars
+    rsiHere = getRSIAtPivot(true)
+    pivotATR = atrVal[rightBars]
+
+    // 与前序高点对比
+    len = array.size(swHiPrice)
+    if len > 0
+        for j = 0 to len - 1
+            pPrice = array.get(swHiPrice, j)
+            pRSI   = array.get(swHiRSI,   j)
+            pBar   = array.get(swHiBar,   j)
+            gap    = pivotBar - pBar
+
+            if gap >= minBarsBW and gap <= maxBarsBW
+                // 常规顶背离: 价格HH + RSI LH + RSI≥超买
+                if showRegBearish and phPrice > pPrice and rsiHere < pRSI and rsiHere >= rsiOverbought
+                    storeDivergence(0, pivotBar, phPrice, pivotATR, pBar, pPrice)
+
+                // 隐藏顶背离: 价格LH + RSI HH + RSI≥超买
+                if showHidBearish and phPrice < pPrice and rsiHere > pRSI and rsiHere >= rsiOverbought
+                    storeDivergence(2, pivotBar, phPrice, pivotATR, pBar, pPrice)
+
+    // 存入当前摆动高点
+    array.push(swHiPrice, phPrice)
+    array.push(swHiRSI,   rsiHere)
+    array.push(swHiBar,   pivotBar)
+
+// ============================================================
+// 处理新摆动低点
+// ============================================================
+if not na(plPrice)
+    pivotBar = bar_index - rightBars
+    rsiHere = getRSIAtPivot(false)
+    pivotATR = atrVal[rightBars]
+
+    len = array.size(swLoPrice)
+    if len > 0
+        for j = 0 to len - 1
+            pPrice = array.get(swLoPrice, j)
+            pRSI   = array.get(swLoRSI,   j)
+            pBar   = array.get(swLoBar,   j)
+            gap    = pivotBar - pBar
+
+            if gap >= minBarsBW and gap <= maxBarsBW
+                // 常规底背离: 价格LL + RSI HL + RSI≤超卖
+                if showRegBullish and plPrice < pPrice and rsiHere > pRSI and rsiHere <= rsiOversold
+                    storeDivergence(1, pivotBar, plPrice, pivotATR, pBar, pPrice)
+
+                // 隐藏底背离: 价格HL + RSI LL + RSI≤超卖
+                if showHidBullish and plPrice > pPrice and rsiHere < pRSI and rsiHere <= rsiOversold
+                    storeDivergence(3, pivotBar, plPrice, pivotATR, pBar, pPrice)
+
+    array.push(swLoPrice, plPrice)
+    array.push(swLoRSI,   rsiHere)
+    array.push(swLoBar,   pivotBar)
+
+// ============================================================
+// 逐K线检查所有未确认背离是否满足确认条件
+// ============================================================
+cnt = array.size(divType)
+if cnt > 0
+    for d = 0 to cnt - 1
+        if not array.get(divDrawn, d)
+            dtype  = array.get(divType, d)
+            dBar   = array.get(divBar, d)
+            dPrice = array.get(divPrice, d)
+            dATR   = array.get(divATR, d)
+            rBar   = array.get(divRefBar, d)
+            rPrice = array.get(divRefPrice, d)
+
+            barsSince = bar_index - dBar
+            if barsSince >= 0
+                confirmed = false
+                if dtype == 0 or dtype == 2  // 顶背离（看跌）
+                    // 价格从摆动高点回落 ≥ ATR × atrMult
+                    lowSince = ta.lowest(low, barsSince + 1)
+                    confirmed := lowSince <= dPrice - dATR * atrMult
+                else  // 底背离（看涨）
+                    highSince = ta.highest(high, barsSince + 1)
+                    confirmed := highSince >= dPrice + dATR * atrMult
+
+                if confirmed
+                    // 标签的 Y 坐标：顶背离标在上方，底背离标在下方
+                    yLabel = (dtype == 0 or dtype == 2) ? dPrice + dATR * 0.5 : dPrice - dATR * 0.5
+                    drawDivergence(dtype, rBar, rPrice, dBar, dPrice, yLabel)
+                    array.set(divDrawn, d, true)
