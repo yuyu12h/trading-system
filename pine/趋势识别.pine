@@ -1,0 +1,279 @@
+//@version=5
+indicator("趋势识别", overlay=true, max_lines_count=200, max_labels_count=200)
+
+// ============================================================
+// 输入参数
+// ============================================================
+pivotLeft   = input.int(5,  "摆动点左侧K线数", minval=2, group="摆动点参数")
+pivotRight  = input.int(3,  "摆动点右侧K线数", minval=2, group="摆动点参数")
+showSwLines = input.bool(true, "显示摆动连接线", group="显示控制")
+
+// ============================================================
+// 摆动点检测
+// ============================================================
+phPrice = ta.pivothigh(high, pivotLeft, pivotRight)
+plPrice = ta.pivotlow(low,   pivotLeft, pivotRight)
+
+// ============================================================
+// 混合同步数组（按时间顺序，最新在前）
+// swType: 1=高点, -1=低点
+// swPrice: 价格
+// swBar: bar_index
+// ============================================================
+var float[] swPrice = array.new_float()
+var int[]   swType  = array.new_int()
+var int[]   swBar   = array.new_int()
+
+if not na(phPrice)
+    array.unshift(swPrice, phPrice)
+    array.unshift(swType, 1)
+    array.unshift(swBar, bar_index - pivotRight)
+    if array.size(swPrice) > 20
+        array.pop(swPrice)
+        array.pop(swType)
+        array.pop(swBar)
+
+if not na(plPrice)
+    array.unshift(swPrice, plPrice)
+    array.unshift(swType, -1)
+    array.unshift(swBar, bar_index - pivotRight)
+    if array.size(swPrice) > 20
+        array.pop(swPrice)
+        array.pop(swType)
+        array.pop(swBar)
+
+// ============================================================
+// 摆动连接线
+// ============================================================
+var line swLine = na
+var int   lastSwBar = na
+var float lastSwPr  = na
+var bool  lastSwIsH = na
+
+if showSwLines
+	if not na(phPrice)
+        cb = bar_index - pivotRight
+        cp = phPrice
+        if not na(lastSwBar)
+            if lastSwIsH
+                if not na(swLine)
+                    line.set_xy2(swLine, cb, cp)
+            else
+                swLine := line.new(lastSwBar, lastSwPr, cb, cp,
+                 xloc=xloc.bar_index, color=color.new(#26A69A, 80), width=1)
+        lastSwBar := cb
+        lastSwPr  := cp
+        lastSwIsH := true
+
+	if not na(plPrice)
+        cb = bar_index - pivotRight
+        cp = plPrice
+        if not na(lastSwBar)
+            if not lastSwIsH
+                if not na(swLine)
+                    line.set_xy2(swLine, cb, cp)
+            else
+                swLine := line.new(lastSwBar, lastSwPr, cb, cp,
+                 xloc=xloc.bar_index, color=color.new(#EF5350, 80), width=1)
+        lastSwBar := cb
+        lastSwPr  := cp
+        lastSwIsH := false
+
+// ============================================================
+// 从混合同步数组提取最新两对高点和低点
+// 同步数组保证交替排列，4个点形成标准N字结构
+// ============================================================
+swCnt = array.size(swType)
+
+// 扫描数组提取最新2个高点和2个低点（不依赖严格交替）
+h0 = float(na)
+h1 = float(na)
+l0 = float(na)
+l1 = float(na)
+hCnt = 0
+lCnt = 0
+
+if swCnt > 0
+    for i = 0 to swCnt - 1
+        if hCnt < 2 and array.get(swType, i) == 1
+            if hCnt == 0
+                h0 := array.get(swPrice, i)
+                hCnt := 1
+            else
+                h1 := array.get(swPrice, i)
+                hCnt := 2
+        else if lCnt < 2 and array.get(swType, i) == -1
+            if lCnt == 0
+                l0 := array.get(swPrice, i)
+                lCnt := 1
+            else
+                l1 := array.get(swPrice, i)
+                lCnt := 2
+        if hCnt == 2 and lCnt == 2
+            break
+
+bool hh = not na(h0) and not na(h1) ? h0 > h1 : false
+bool hl = not na(l0) and not na(l1) ? l0 > l1 : false
+bool lh = not na(h0) and not na(h1) ? h0 < h1 : false
+bool ll = not na(l0) and not na(l1) ? l0 < l1 : false
+
+// ============================================================
+// 状态机
+// 状态: 0=震荡  1=强势↑  2=弱势↑  -1=强势↓  -2=弱势↓
+// ============================================================
+var int state = 0
+var float protectHL = na   // 强势↑锁定的保护位
+var float protectLH = na   // 强势↓锁定的保护位
+var bool coolUp = false   // ↑方向CHoCH冷却标志
+var bool coolDn = false   // ↓方向CHoCH冷却标志
+if swCnt >= 4 and not na(h0) and not na(h1) and not na(l0) and not na(l1)
+    // 新摆动点形成时，重置冷却标志
+    if not na(phPrice) or not na(plPrice)
+        coolUp := false
+        coolDn := false
+
+    // ── 震荡 ──
+    // 从震荡进入趋势需验证N字结构方向：
+    //   上升趋势 N 字必须从低点开始：L→H→L→H → 最新摆动是高点
+    //   下降趋势 N 字必须从高点开始：H→L→H→L → 最新摆动是低点
+    if state == 0
+        if array.get(swType, 0) == 1 and hh and hl and not coolUp
+            state := 1
+            protectHL := l0
+        else if array.get(swType, 0) == -1 and lh and ll and not coolDn
+            state := -1
+            protectLH := h0
+
+    // ── 强势上升 ──
+    else if state == 1
+        if not na(protectHL) and close < protectHL
+            coolUp := true
+            state := 0
+            protectHL := na
+        else if hh and hl
+            protectHL := l0
+        else if lh and hl
+            state := 2
+        else
+            coolUp := true
+            state := 0
+            protectHL := na
+
+    // ── 弱势上升 ──
+    else if state == 2
+        if hh and hl
+            state := 1
+            protectHL := l0
+        else if not na(protectHL) and close < protectHL
+            if hh and hl
+                state := 1
+                protectHL := l0
+            else if lh and ll
+                state := -1
+                protectLH := h0
+                protectHL := na
+            else
+                coolUp := true
+                state := 0
+                protectHL := na
+
+    // ── 强势下降 ──
+    else if state == -1
+        if not na(protectLH) and close > protectLH
+            coolDn := true
+            state := 0
+            protectLH := na
+        else if lh and ll
+            protectLH := h0
+        else if lh and hl
+            state := -2
+        else
+            coolDn := true
+            state := 0
+            protectLH := na
+
+    // ── 弱势下降 ──
+    else if state == -2
+        if lh and ll
+            state := -1
+            protectLH := h0
+        else if not na(protectLH) and close > protectLH
+            if hh and hl
+                state := 1
+                protectHL := l0
+                protectLH := na
+            else if lh and hl
+                coolDn := true
+                state := 0
+                protectLH := na
+            else if lh and ll
+                state := -1
+                protectLH := h0
+            else
+                coolDn := true
+                state := 0
+                protectLH := na
+
+// ============================================================
+// 一致性计数（显示用）
+// ============================================================
+consis = 0
+if not na(h0) and not na(h1) and not na(l0) and not na(l1)
+    if hh and hl
+        consis := 1
+    else if lh and ll
+        consis := -1
+
+// ============================================================
+// 背景色
+// ============================================================
+bgCol = switch state
+    1  => color.new(#00C853, 92)
+    2  => color.new(#76FF03, 90)
+    -1 => color.new(#E84118, 92)
+    -2 => color.new(#FF6D00, 90)
+    =>  color.new(#7C4DFF, 90)
+bgcolor(bgCol, title="趋势背景")
+
+// ============================================================
+// 标签
+// ============================================================
+var label infoLbl = na
+if barstate.islast
+    stateTxt = switch state
+        1  => "📗 强势上升"
+        2  => "📒 弱势上升"
+        -1 => "📕 强势下降"
+        -2 => "📘 弱势下降"
+        =>  "📓 震荡"
+    txt = stateTxt + "\n连续性: " + str.tostring(consis) + "\n"
+    txt += "h0/h1=" + str.tostring(h0, "#") + "/" + str.tostring(h1, "#") + " "
+    txt += "l0/l1=" + str.tostring(l0, "#") + "/" + str.tostring(l1, "#") + "\n"
+    txt += "HH= " + (hh ? "1" : "0") + " HL=" + (hl ? "1" : "0") + " "
+    txt += "LH=" + (lh ? "1" : "0") + " LL=" + (ll ? "1" : "0")
+    txt += " coolDn=" + (coolDn ? "1" : "0")
+
+    if na(infoLbl)
+        infoLbl := label.new(bar_index, na, txt, xloc=xloc.bar_index,
+         yloc=yloc.price, color=color.new(#1a1a2e, 80), textcolor=color.white,
+         style=label.style_label_center, size=size.small)
+        label.set_xy(infoLbl, bar_index + 10, ta.highest(high, 50) * 1.05)
+    else
+        label.set_xy(infoLbl, bar_index + 10, ta.highest(high, 50) * 1.05)
+        label.set_text(infoLbl, txt)
+
+plot(state * 10, "趋势", display=display.none)
+
+// ============================================================
+// 调试输出（排查"震荡→强势下降"bug用）
+// ============================================================
+plot(hh ? 1 : 0, "HH", display=display.none)
+plot(hl ? 1 : 0, "HL", display=display.none)
+plot(lh ? 1 : 0, "LH", display=display.none)
+plot(ll ? 1 : 0, "LL", display=display.none)
+plot(array.size(swType) > 0 ? array.get(swType, 0) : 0, "swType0", display=display.none)
+plot(coolDn ? 1 : 0, "coolDn", display=display.none)
+plot(na(h0) ? 0 : h0, "h0", display=display.none)
+plot(na(h1) ? 0 : h1, "h1", display=display.none)
+plot(na(l0) ? 0 : l0, "l0", display=display.none)
+plot(na(l1) ? 0 : l1, "l1", display=display.none)
