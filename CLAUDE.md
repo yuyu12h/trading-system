@@ -270,3 +270,81 @@ if len > 0
 **工作流程教训：**
 - 不要在没有用户同意的情况下擅自换方案。如果当前方案有 bug，修复 bug，不是换思路。
 - 讨论逻辑 → 用户确认 → 再改代码，顺序不能乱。
+
+## 11. 震荡区识别指标设计原则
+
+**震荡区边界更新 vs 突破退出是一体两面，必须同时设计。**
+- 如果边界是动态更新的（每根新K线都可能扩大），"收盘超出边界"的退出条件在数学上有矛盾——收盘不会超过自己创造的最高值
+- 必须在设计阶段就定好：边界什么时候更新、什么时候锁定、突破检测用哪套边界
+- 解决方案：用不同数据源做不同的事——**摆动点（价格极值）定义边界**，**收盘价确认突破**
+- 参考文章：[Dîngoreanu (2015)](https://www.utcluj.ro/media/documents/2015/Abilitare_Dinsoreanu.pdf) 的归一化市场位置函数
+
+**不要在用户给的退出条件上叠加自己的中间状态。**
+- ❌ 用户说"连续 2 根收盘超出=退出" → 我加"条件失效→冻结边界→然后等突破"共 3 个阶段
+- ✅ 进入一条规则（ER < 0.35 满足）、退出一条规则（收盘连续超出），对称干净
+- Karpathy 第 2 条的具体体现：**用户不要求的过渡状态，就是过度设计**
+
+**学术调研的价值边际递减。**
+- 调研 Ventura 2023 的 ML 集成模型 → 核心结论只是"ER 是区分度最高的单一特征"
+- 调研的意义是**确认方案可行**，不是**找到最优方案让你改方向**
+- 先设计再调研验证，而不是调研完了再设计
+
+**震荡检测指标的三层架构：**
+```
+Detection（震荡期识别）→ ER + MA平坦
+Definition（边界定义）→ 摆动点极值法 + 滚动窗口
+Termination（退出检测）→ 连续同侧收盘突破
+```
+每层独立可调，改一层不影响其他层。
+
+**Efficiency Ratio 公式：**
+```pine
+// ER = |close - close[N]| / sum(|close[i] - close[i-1]|, N)
+erDirection = math.abs(close - close[erPeriod])
+erVolatility = 0.0
+for i = 0 to erPeriod - 1
+    erVolatility += math.abs(close[i] - close[i + 1])
+erValue = erVolatility > 0 ? erDirection / erVolatility : 1.0
+// ER < 0.3-0.35 = 震荡（无净进展，来回折返）
+```
+
+## 12. Pine Script v5 编译错误实录（震荡指标踩的坑）
+
+**`input.int` 的 `minval`/`maxval` 需要编译期常量，不能是另一个 `input` 变量。**
+```pine
+// ❌ maxval 必须是 const int
+minBars = input.int(9, "最少", maxval=erPeriod)
+// ✅ 写成固定值
+minBars = input.int(9, "最少", maxval=14)
+```
+
+**`bgcolor()` 必须在全局作用域调用，不能在 `if/else` 块内。**
+```pine
+// ❌ 局部作用域不行
+if inCons
+    bgcolor(color.new(#FF9800, 92))
+// ✅ 全局调用，颜色用条件表达式预计算
+bgCol = inCons ? color.new(#FF9800, 92) : color.new(#000000, 100)
+bgcolor(bgCol)
+```
+
+**v5 函数必须带命名空间前缀：`math.max` 不是 `max`，`math.min` 不是 `min`。**
+- `math.abs`, `math.max`, `math.min`, `math.sum` — `math.` 开头的数学函数
+- `ta.atr`, `ta.ema`, `ta.highest`, `ta.lowest`, `ta.pivothigh`, `ta.pivotlow` — `ta.` 开头的指标函数
+- 漏一个就报 "Could not find function or function reference 'xxx'"
+
+**函数体用隐式返回，不要用 `return`。**
+```pine
+// ❌ return 关键字可能导致编译不兼容
+findBoundary() =>
+    if cond
+        return [val, true]
+    return [na, false]
+
+// ✅ 最后一个表达式是返回值
+findBoundary() =>
+    if cond
+        [val, true]
+    else
+        [na, false]
+```

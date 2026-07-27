@@ -1,0 +1,368 @@
+//@version=5
+indicator("震荡区域识别", overlay=true, max_boxes_count=100, max_labels_count=100)
+
+// ============================================================
+// 输入参数
+// ============================================================
+erPeriod    = input.int(14,   "ER周期", group="震荡检测")
+erThresh    = input.float(0.35, "ER阈值", group="震荡检测")
+confirmMin  = input.int(9,    "最少满足K线数", minval=1, maxval=14, group="震荡检测")
+
+emaLen      = input.int(21,   "EMA长度", group="MA平坦")
+flatWin     = input.int(14,   "平坦窗口", group="MA平坦")
+flatThresh  = input.float(0.5, "平坦阈值(ATR倍数)", step=0.1, group="MA平坦")
+
+swL         = input.int(4,    "摆动左", group="摆动点")
+swR         = input.int(2,    "摆动右", group="摆动点")
+swL_s       = input.int(3,    "灵敏摆动左", group="摆动点")
+swR_s       = input.int(1,    "灵敏摆动右", group="摆动点")
+
+noiseStd    = input.float(0.30, "噪音阈值(ATR倍数)", step=0.05, group="过滤")
+noiseRel    = input.float(0.15, "宽松噪音(ATR倍数)", step=0.05, group="过滤")
+scanWin     = input.int(30,   "边界扫描窗口", group="边界")
+atrLen      = input.int(14,   "ATR长度", group="边界")
+
+// ============================================================
+// 基础计算
+// ============================================================
+atrVal = ta.atr(atrLen)
+
+// ---- Efficiency Ratio ----
+erDir = math.abs(close - close[erPeriod])
+erVol = 0.0
+for i = 0 to erPeriod - 1
+    erVol += math.abs(close[i] - close[i + 1])
+erVal = erVol > 0 ? erDir / erVol : 1.0
+
+// ---- EMA 21 平坦（ATR 归一化，跨周期自适应） ----
+ema21 = ta.ema(close, emaLen)
+emaMovement = ta.highest(ema21, flatWin) - ta.lowest(ema21, flatWin)
+emaNorm = atrVal > 0 ? emaMovement / atrVal : 999.0
+maIsFlat = emaNorm < flatThresh
+
+// ---- 震荡条件 ----
+erLow = erVal < erThresh ? 1.0 : 0.0
+erLowCnt = int(math.sum(erLow, erPeriod))
+consCond = erLowCnt >= confirmMin and maIsFlat
+
+// ============================================================
+// 摆动点检测与存储
+// ============================================================
+// 标准摆动 (swL, swR)
+var float[] swHiPr  = array.new_float()
+var int[]   swHiBar = array.new_int()
+var float[] swLoPr  = array.new_float()
+var int[]   swLoBar = array.new_int()
+
+ph = ta.pivothigh(high, swL, swR)
+pl = ta.pivotlow(low, swL, swR)
+
+if not na(ph)
+    array.unshift(swHiPr, ph)
+    array.unshift(swHiBar, bar_index - swR)
+    if array.size(swHiPr) > 100
+        array.pop(swHiPr)
+        array.pop(swHiBar)
+
+if not na(pl)
+    array.unshift(swLoPr, pl)
+    array.unshift(swLoBar, bar_index - swR)
+    if array.size(swLoPr) > 100
+        array.pop(swLoPr)
+        array.pop(swLoBar)
+
+// 灵敏摆动 (swL_s, swR_s)
+var float[] swHiPrS  = array.new_float()
+var int[]   swHiBarS = array.new_int()
+var float[] swLoPrS  = array.new_float()
+var int[]   swLoBarS = array.new_int()
+
+phS = ta.pivothigh(high, swL_s, swR_s)
+plS = ta.pivotlow(low, swL_s, swR_s)
+
+if not na(phS)
+    array.unshift(swHiPrS, phS)
+    array.unshift(swHiBarS, bar_index - swR_s)
+    if array.size(swHiPrS) > 100
+        array.pop(swHiPrS)
+        array.pop(swHiBarS)
+
+if not na(plS)
+    array.unshift(swLoPrS, plS)
+    array.unshift(swLoBarS, bar_index - swR_s)
+    if array.size(swLoPrS) > 100
+        array.pop(swLoPrS)
+        array.pop(swLoBarS)
+
+// ============================================================
+// 边界查找函数
+// ============================================================
+// 返回 [上界, 下界, 是否成功]
+findBoundary(scanStart, useSensitive, noiseThresh) =>
+    hiPrArr = useSensitive ? swHiPrS : swHiPr
+    hiBarArr = useSensitive ? swHiBarS : swHiBar
+    loPrArr = useSensitive ? swLoPrS : swLoPr
+    loBarArr = useSensitive ? swLoBarS : swLoBar
+
+    // 采集范围内的摆动高点
+    hiTmp = array.new_float()
+    hN = array.size(hiPrArr)
+    if hN > 0
+        for i = 0 to hN - 1
+            if array.get(hiBarArr, i) >= scanStart
+                array.push(hiTmp, array.get(hiPrArr, i))
+
+    // 采集范围内的摆动低点
+    loTmp = array.new_float()
+    lN = array.size(loPrArr)
+    if lN > 0
+        for i = 0 to lN - 1
+            if array.get(loBarArr, i) >= scanStart
+                array.push(loTmp, array.get(loPrArr, i))
+
+    hCnt = array.size(hiTmp)
+    lCnt = array.size(loTmp)
+
+    hiFilt = array.new_float()
+    loFilt = array.new_float()
+
+    if hCnt > 0 and lCnt > 0
+        // 噪音过滤：摆动点到最近异侧摆动点的距离 < 阈值 → 剔除
+        for i = 0 to hCnt - 1
+            p = array.get(hiTmp, i)
+            minDist = 999999.0
+            for j = 0 to lCnt - 1
+                d = math.abs(p - array.get(loTmp, j))
+                if d < minDist
+                    minDist := d
+            if minDist >= noiseThresh * atrVal
+                array.push(hiFilt, p)
+
+        for i = 0 to lCnt - 1
+            p = array.get(loTmp, i)
+            minDist = 999999.0
+            for j = 0 to hCnt - 1
+                d = math.abs(p - array.get(hiTmp, j))
+                if d < minDist
+                    minDist := d
+            if minDist >= noiseThresh * atrVal
+                array.push(loFilt, p)
+
+    // 最后一个表达式是返回值（隐式返回）
+    if array.size(hiFilt) > 0 and array.size(loFilt) > 0
+        // 极值法：取最高/最低
+        up = array.get(hiFilt, 0)
+        hiSize = array.size(hiFilt)
+        if hiSize > 1
+            for i = 1 to hiSize - 1
+                if array.get(hiFilt, i) > up
+                    up := array.get(hiFilt, i)
+        dn = array.get(loFilt, 0)
+        loSize = array.size(loFilt)
+        if loSize > 1
+            for i = 1 to loSize - 1
+                if array.get(loFilt, i) < dn
+                    dn := array.get(loFilt, i)
+        [up, dn, true]
+    else
+        [float(na), float(na), false]
+
+// ============================================================
+// 状态变量
+// ============================================================
+var bool  inCons       = false
+var int   consStartBar = -1
+var float upper        = na
+var float lower        = na
+var int   activeLayer  = 4
+var int   upgradeCnt   = 0
+var int   upgradeTgt   = -1
+var int   upBrk        = 0
+var int   dnBrk        = 0
+
+// 所有历史震荡区矩形
+var box[] historyBoxes = array.new_box()
+
+// ============================================================
+// 状态机
+// ============================================================
+if not inCons
+    // —— 检查进入震荡 ——
+    if consCond
+        // 回溯找到震荡实际开始的K线
+        // 从当前往回扫描，找到 erLowCnt 首次低于确认数的位置
+        backScan = math.min(bar_index, erPeriod + flatWin)
+        adjStart = bar_index - backScan
+        for i = 1 to backScan
+            if erLowCnt[i] < confirmMin - 2
+                adjStart := bar_index - i + 1
+                break
+        consStartBar := adjStart
+        inCons := true
+        activeLayer := 4
+        upgradeCnt := 0
+        upgradeTgt := -1
+        upBrk := 0
+        dnBrk := 0
+        upper := na
+        lower := na
+else
+    // —— 震荡中 ——
+    sStart = math.max(consStartBar, bar_index - scanWin)
+
+    // 逐层尝试：第1层→第2层→第3层→第4层
+    [u1, l1, ok1] = findBoundary(sStart, false, noiseStd)
+    [u2, l2, ok2] = findBoundary(sStart, false, noiseRel)
+    [u3, l3, ok3] = findBoundary(sStart, true,  noiseRel)
+
+    // 找最优层（最严格的有效层）
+    calcUp    = float(na)
+    calcDn    = float(na)
+    bestLayer = 4
+
+    if ok1
+        bestLayer := 1
+        calcUp := u1
+        calcDn := l1
+    else if ok2
+        bestLayer := 2
+        calcUp := u2
+        calcDn := l2
+    else if ok3
+        bestLayer := 3
+        calcUp := u3
+        calcDn := l3
+    else
+        lookback = bar_index - consStartBar + 1
+        effWin   = math.min(scanWin, lookback)
+        calcUp := ta.highest(high, effWin)
+        calcDn := ta.lowest(low, effWin)
+
+    // 分层切换规则
+    effLayer = activeLayer
+    if bestLayer > activeLayer
+        // 条件变差 → 即时降级
+        activeLayer := bestLayer
+        upgradeCnt := 0
+        upgradeTgt := -1
+        effLayer := activeLayer
+    else if bestLayer < activeLayer
+        // 可升级（更严格） → 等待 3 根确认
+        if bestLayer == upgradeTgt
+            upgradeCnt += 1
+            if upgradeCnt >= 3
+                activeLayer := bestLayer
+                upgradeCnt := 0
+                upgradeTgt := -1
+        else
+            upgradeTgt := bestLayer
+            upgradeCnt := 1
+        effLayer := activeLayer  // 确认前仍用旧层
+    else
+        upgradeCnt := 0
+        upgradeTgt := -1
+        effLayer := activeLayer
+
+    // 用有效层计算边界
+    if effLayer == 1
+        [u, l, ok] = findBoundary(sStart, false, noiseStd)
+        if ok
+            upper := u
+            lower := l
+    else if effLayer == 2
+        [u, l, ok] = findBoundary(sStart, false, noiseRel)
+        if ok
+            upper := u
+            lower := l
+    else if effLayer == 3
+        [u, l, ok] = findBoundary(sStart, true, noiseRel)
+        if ok
+            upper := u
+            lower := l
+    else
+        lookback = bar_index - consStartBar + 1
+        effWin   = math.min(scanWin, lookback)
+        upper := ta.highest(high, effWin)
+        lower := ta.lowest(low, effWin)
+
+    // —— 检查突破 ——
+    if not na(upper) and not na(lower)
+        if close > upper
+            upBrk += 1
+            dnBrk := 0
+        else if close < lower
+            dnBrk += 1
+            upBrk := 0
+        else
+            upBrk := 0
+            dnBrk := 0
+
+        if upBrk >= 2 or dnBrk >= 2
+            inCons := false
+            // 创建历史矩形，推入数组保留
+            nb = box.new(left=consStartBar, right=bar_index,
+             top=upper, bottom=lower,
+             xloc=xloc.bar_index,
+             border_color=color.new(#7C4DFF, 40),
+             border_width=1,
+             bgcolor=color.new(#7C4DFF, 85),
+             text="震荡")
+            array.push(historyBoxes, nb)
+            if array.size(historyBoxes) > 100
+                box.delete(array.get(historyBoxes, 0))
+                array.shift(historyBoxes)
+
+// ============================================================
+// 绘制
+// ============================================================
+// ---- 活跃震荡区矩形 ————————
+var box activeBox = na
+if inCons and not na(upper) and not na(lower)
+    if na(activeBox)
+        activeBox := box.new(left=consStartBar, right=bar_index,
+         top=upper, bottom=lower,
+         xloc=xloc.bar_index,
+         border_color=color.new(#FF9800, 60),
+         border_width=1,
+         bgcolor=color.new(#FF9800, 88))
+    else
+        box.set_right(activeBox, bar_index)
+        box.set_top(activeBox, upper)
+        box.set_bottom(activeBox, lower)
+else if not na(activeBox)
+    box.delete(activeBox)
+    activeBox := na
+
+// ---- K线背景色 ————————
+bgcolor(inCons ? color.new(#FF9800, 92) : color.new(#000000, 100), title="震荡背景")
+
+// ---- 标签 ————————
+var label infoLbl = na
+if barstate.islast
+    txt = "ER: " + str.tostring(erVal, "#.###")
+    txt += "\nER达标: " + str.tostring(erLowCnt) + "/" + str.tostring(erPeriod)
+    if inCons
+        txt += "\n状态: 活跃震荡"
+        txt += "\n层: " + str.tostring(activeLayer)
+        if not na(upper)
+            txt += "\n上界: " + str.tostring(upper, "#.##")
+            txt += "\n下界: " + str.tostring(lower, "#.##")
+    else
+        txt += "\n状态: 非震荡"
+
+    if na(infoLbl)
+        infoLbl := label.new(bar_index, na, txt, xloc=xloc.bar_index,
+         yloc=yloc.price, color=color.new(#1a1a2e, 80),
+         textcolor=color.white, style=label.style_label_center,
+         size=size.small)
+    label.set_xy(infoLbl, bar_index + 10, ta.highest(high, 50) * 1.05)
+    label.set_text(infoLbl, txt)
+
+// ============================================================
+// 调试输出
+// ============================================================
+plot(erVal,       "ER",       display=display.none)
+plot(erLowCnt,    "ER达标数",  display=display.none)
+plot(emaNorm, "EMA波动(ATR)", display=display.none)
+plot(inCons ? 1 : 0, "震荡中",   display=display.none)
+plot(activeLayer, "活跃层",    display=display.none)
