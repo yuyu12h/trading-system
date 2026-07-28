@@ -157,6 +157,37 @@ if array.get(swType, 0) == 1
 
 **`color.new(#HEX, opacity)` — opacity 0~100，0 完全不透明，60 半透明。**
 
+**`var` 变量声明必须在首次使用之前。** Pine Script 按源码顺序解析，`var` 声明放在文件末尾但在前面代码中引用会报 `Undeclared identifier`。
+
+```pine
+// ❌ var 声明在引用之后 → 编译报错
+if needRebuildLines
+    array.clear(midLines)  // 报错: Undeclared identifier 'midLines'
+
+var line[] midLines = array.new<line>()  // 声明在后面
+
+// ✅ var 声明在引用之前
+var line[] midLines = array.new<line>()
+if needRebuildLines
+    array.clear(midLines)  // 正确
+```
+
+**`while` 条件中的 `and` 短路求值不可靠。** Pine Script 文档说 `and` 会短路，但 `while` 条件中实测可能不短路，导致数组越界。
+
+```pine
+// ❌ seg=midCount-1 时可能仍然求值 array.get(midBarsArr, seg+1) → 越界
+while seg < midCount - 1 and b >= array.get(midBarsArr, seg + 1)
+    seg := seg + 1
+
+// ✅ 拆成嵌套判断，break 安全退出
+while seg < midCount - 1
+    if b < array.get(midBarsArr, seg + 1)
+        break
+    seg := seg + 1
+```
+
+**`break` 在 `for` 和 `while` 循环中均可用（v5）。**
+
 ## 6. 交易员隐性条件挖掘
 
 **用户（交易员）提供的形态条件是"肉眼标准"，不是"计算机标准"。**
@@ -187,8 +218,9 @@ if array.get(swType, 0) == 1
 - fill 直接画在每个K线上，缩放不会变
 
 **Pine Script 重算机制：**
-- 每次缩放/滚动都会从 bar 0 重新执行整个脚本
-- `var` 变量在重算开始时重置
+- 每次缩放/滚动都会从 bar 0 重新执行整个脚本（完整重算）
+- 完整重算时 `var` 变量重置为初始值
+- **实时更新（新 bar/tick）时 `var` 变量持久化**，保留上一轮执行结果——这可用于跨执行缓存
 - `box.new` 在重算时重新创建（旧的被清除）
 - 不要在 `barstate.islast` 里画 box，会在不同"最后一根K线"上产生不同结果
 - 在历史K线上画 box 会被限制（"too far from current bar"），用 `right=bar_index` 规避
@@ -225,6 +257,30 @@ label.new(t, price, text, xloc=xloc.bar_time, ...)
 ```
 
 **注意**：如果用 `line.set_xy1/set_xy2` 更新已有线，坐标也要用时间戳（与创建时的 `xloc` 一致）。
+
+**`plot()` vs `line.new` 抉择——当 bar 的值依赖未来数据时。**
+
+这是本次中值线重构踩的最大的坑，浪费了数小时。
+
+`plot()` 的致命限制：每根 bar 的值在它执行那一刻永久锁定。如果 bar 31 的值需要 bar 60 拐点确认后才能计算，bar 31 执行时该数据还不存在——算出来是 `na`，而且永远无法回头改写。
+
+```
+时间线：bar 0 → bar 31 → bar 50 → bar 60 → bar 80
+                                  ↑ 第三个拐点确认
+                                  ↑ 此时才知道 bar 50 的中值点位置
+                                  ↑ 但 bar 31-49 的 plot 值早已锁定为 na
+```
+
+**`line.new` 不受此限制**——它从当前 bar 用完整数据一次性画出所有线段。bar 80 时 `mergedBar` 已包含全部确认拐点，可以正确画出 bar 31-49 区间内的中值线段。
+
+**决策规则：**
+| 场景 | 用 |
+|------|-----|
+| 每根 bar 的值只依赖 ≤ 自身 bar_index 的数据 | `plot()` ✓ |
+| 每根 bar 的值依赖后续 bar 才能确定的数据（如中值插值需要后续拐点） | `line.new` ✓ |
+| 需要 hover 显示每根 bar 的数值 | `plot()`（但受上述限制） |
+
+**教训：在 Pine 里做"时间序列插值"时，不要本能地用 `plot()`。先问：这个插值目标在未来 bar 执行时才知道吗？是 → 用 `line.new`。**
 
 ## 8. 代码交付纪律
 
@@ -417,6 +473,12 @@ line.new(bar1, price1, bar2, price2, color=color.red, width=2)
 
 **`indicator()` 的 `shorttitle` 不能超过 10 个字符。** 否则编译 warning。
 
+**`max_lines_count` 硬上限为 500。** 设更大的值编译报错：
+```
+The script max_lines_count value (1000) is greater than the maximum possible value (500)
+```
+如果同时画多组线（如 zigzag 主线 + 中值线），需要控制数组存储上限来保证总线数 ≤ 500。例如数组限 200 → ~200 主线 + ~199 中值线 + 2 潜在线 ≈ 401。
+
 ## 13. CDP 注入 Pine Script 到 TradingView 实操
 
 **前置条件**：TradingView 通过 CDP 端口 9222 运行。
@@ -459,3 +521,5 @@ line.new(bar1, price1, bar2, price2, color=color.red, width=2)
    Ctrl+S → 检查弹窗 → Add to chart 按钮 →
    getModelMarkers 检查编译
    ```
+
+7. **FIND_MONACO 返回 E0 且编辑器存在但 React fiber 找不到**：TradingView 运行久了 Monaco 的 React fiber 引用可能丢失。**重启 TradingView** 即可恢复（`taskkill //F //IM TradingView.exe` 后重新启动）。点击 Pine 按钮或 `activateScriptEditorTab()` 都无法修复此状态。

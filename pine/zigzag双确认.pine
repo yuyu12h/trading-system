@@ -16,8 +16,9 @@ a2Deviation = input.int(5, 'Deviation', minval=1, group='算法二: ZigZag++', t
 a2Backstep  = input.int(2, 'Backstep', minval=2, group='算法二: ZigZag++', tooltip='方向变化须持续N根K线确认')
 
 // --- 显示 ---
-lineWidth  = input.int(2, '线宽', minval=1, maxval=4, group='显示')
-upColor    = input.color(color.new(color.lime, 0), '上涨色', group='显示')
+lineWidth    = input.int(2, '线宽', minval=1, maxval=4, group='显示')
+midLineWidth = input.int(2, '中值线宽', minval=1, maxval=4, group='显示')
+upColor      = input.color(color.new(color.lime, 0), '上涨色', group='显示')
 dnColor    = input.color(color.new(color.red, 0), '下跌色', group='显示')
 showLabels = input.bool(true, '显示标签', group='显示')
 labelSizeStr = input.string('Small', '标签大小', ['Tiny', 'Small', 'Normal', 'Large', 'Huge'], group='显示')
@@ -32,7 +33,7 @@ var a1Type  = array.new<string>()
 var a1Time  = array.new<int>()
 
 // 限制数组大小
-a1MaxSize = 500
+a1MaxSize = 200
 
 a1GarbageCollect() =>
     while array.size(a1Bar) > a1MaxSize
@@ -120,7 +121,7 @@ var a2Price = array.new<float>()
 var a2Type  = array.new<string>()
 var a2Time  = array.new<int>()
 
-a2MaxSize = 500
+a2MaxSize = 200
 
 a2GarbageCollect() =>
     while array.size(a2Bar) > a2MaxSize
@@ -314,6 +315,10 @@ if needMerge
     prevA1LastBar := a1CurLastBar
     prevA2LastBar := a2CurLastBar
 
+// --- 中值线：相邻中值点之间用线连接（line.new，从当前 bar 用完整数据画）---
+var line[] midLines    = array.new<line>()
+var line  potMidLine   = na
+
 // ===================================================================
 // 绘制
 // ===================================================================
@@ -336,7 +341,6 @@ if needRebuildLines
         for i = 0 to llSize - 1
             line.delete(array.get(mergedLines, i))
         array.clear(mergedLines)
-
     // 创建新线：相邻合并点两两连接（xloc.bar_time 避免历史坐标越界）
     if mSize > 1
         for i = 1 to mSize - 1
@@ -348,6 +352,21 @@ if needRebuildLines
             lColor  = segType == 'High' ? dnColor : upColor
             newLine = line.new(t1, p1, t2, p2, xloc=xloc.bar_time, color=lColor, width=lineWidth)
             array.push(mergedLines, newLine)
+
+    // 中值线：相邻中点两两连接
+    mlSize2 = array.size(midLines)
+    if mlSize2 > 0
+        for i = 0 to mlSize2 - 1
+            line.delete(array.get(midLines, i))
+        array.clear(midLines)
+    if mSize > 2
+        for i = 2 to mSize - 1
+            midT1 = (array.get(mergedTime, i - 2) + array.get(mergedTime, i - 1)) / 2
+            midP1 = (array.get(mergedPrice, i - 2) + array.get(mergedPrice, i - 1)) / 2
+            midT2 = (array.get(mergedTime, i - 1) + array.get(mergedTime, i)) / 2
+            midP2 = (array.get(mergedPrice, i - 1) + array.get(mergedPrice, i)) / 2
+            newMidLine = line.new(midT1, midP1, midT2, midP2, xloc=xloc.bar_time, color=color.black, width=midLineWidth)
+            array.push(midLines, newMidLine)
 
     prevMSize    := mSize
     prevMLastBar := mLastBar
@@ -422,6 +441,24 @@ if mSize > 0
     else
         label.set_xy(potLabel, targetTime, targetPrice)
         label.set_text(potLabel, str.tostring(targetPrice, format.mintick))
+
+    // 潜在中值线：最后中点 → (lastP与close[1])的中点
+    if mSize > 1
+        secondLastTime = array.get(mergedTime, mSize - 2)
+        secondLastPrice = array.get(mergedPrice, mSize - 2)
+        lastMidT = (secondLastTime + lastTime) / 2
+        lastMidP = (secondLastPrice + lastPriceP) / 2
+        potMidT = (lastTime + targetTime) / 2
+        potMidP = (lastPriceP + targetPrice) / 2
+        if na(potMidLine)
+            potMidLine := line.new(lastMidT, lastMidP, potMidT, potMidP, xloc=xloc.bar_time, color=color.black, width=midLineWidth)
+        else
+            line.set_xy1(potMidLine, lastMidT, lastMidP)
+            line.set_xy2(potMidLine, potMidT, potMidP)
+    else if not na(potMidLine)
+        line.delete(potMidLine)
+        potMidLine := na
+
 else
     if not na(potLine)
         line.delete(potLine)
@@ -429,3 +466,6 @@ else
     if not na(potLabel)
         label.delete(potLabel)
         potLabel := na
+    if not na(potMidLine)
+        line.delete(potMidLine)
+        potMidLine := na
