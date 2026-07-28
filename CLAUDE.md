@@ -1,6 +1,38 @@
 # CLAUDE.md
 
-Karpathy 编程行为准则，减少 LLM 常见编码错误。偏重谨慎而非速度，简单任务自行判断。
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## 项目概览
+
+Pine Script 技术指标开发项目，用于 TradingView 桌面版。指标文件位于 `pine/`。
+
+**环境**：Windows 10 + Git Bash + Node.js。TradingView 通过 CDP 端口 9222 注入和测试。
+
+| 文件 | 说明 |
+|------|------|
+| `pine/zigzag双确认.pine` | 双算法交集确认 ZigZag（最新） |
+| `pine/趋势识别.pine` | HH+HL/LH+LL 结构趋势 + CHoCH 状态机 |
+| `pine/震荡区域识别.pine` | ER + MA平坦 + 摆动点边界 + 四层渐进 |
+| `pine/K线组合识别.pine` | 吞没/早晨之星/黄昏之星/孕线/四K反转 |
+| `pine/RSI背离识别.pine` | 常规+隐藏背离 + ATR确认 |
+| `pine/k线形态识别.pine` | 单K线形态识别 |
+| `mcp/tvcontrol/` | TradingView CDP MCP 服务器（102 个工具） |
+| `.mcp.json` | MCP 服务器配置（tvcontrol 指向 mcp/tvcontrol/src/server.js） |
+
+### 设计模式：多算法交集确认（zigzag双确认 经验）
+
+整合多套拐点检测算法时，用**交集确认 + 争议仲裁**替代简单的"投票"：
+
+1. 各算法独立运行，各自产出交替 H-L 序列
+2. 取交集作为确认骨架：同 bar_index + 同类型 = 确认点
+3. 争议段处理：相邻确认点为同类型时（如 H→H），在区间内搜索双方的反向点，高点取更高 / 低点取更低，恢复交替
+4. 骨架前后的孤立点（仅一方识别到）丢弃
+
+这比加权评分或投票更简洁，且保证输出序列永远交替。
+
+## 编码行为准则
+
+Karpathy 编程准则，减少 LLM 常见编码错误。偏重谨慎而非速度，简单任务自行判断。
 
 ## 1. 先想再写
 
@@ -125,6 +157,23 @@ if array.get(swType, 0) == 1
 
 **`color.new(#HEX, opacity)` — opacity 0~100，0 完全不透明，60 半透明。**
 
+## 6. 交易员隐性条件挖掘
+
+**用户（交易员）提供的形态条件是"肉眼标准"，不是"计算机标准"。**
+
+交易员说"这是个吞没形态"时，心里默认第二根明显更大，但不会专门说出来。代码按字面条件实现后，信号量够了但质量不行——因为隐性条件没挖出来。
+
+**每次设计指标时，条件讨论完后必须多问几个问题：**
+
+```
+1. 反例挖掘："满足这些条件、但你看到也不会认为是这个形态的情况有哪些？"
+2. 视觉直觉："这个形态肉眼看还有什么特征是自然而然、不需要特意说的？"
+3. 信号质量："这些信号够强吗？有没有勉强算但实际你不想看到的？"
+4. 强弱对比："关键K线和周围K线的大小对比要达到什么程度才叫'明显'？"
+```
+
+**让用户举反例比自己猜阈值更有效。** 比如问"什么样的情况勉强算吞没但其实不是你想要的"，比问"倍数设1.5还是2？"更能对齐预期。
+
 ## 7. box 渲染与 Pine Script 执行模型
 
 **`box.new` 的坐标稳定性：**
@@ -153,6 +202,29 @@ if array.get(swType, 0) == 1
 6. `box` 的上下边界用动态 swing 值更新 → 震荡前的老 swing 污染范围
 
 **教训：能用 plot+fill 就别用 box。box 只在"确定已完成、固定坐标"的场景使用。**
+
+**`line.new` / `label.new` 历史坐标越界。** 用 `xloc.bar_index`（默认）时，如果起点 `bar_index` 距离当前 bar 太远（约 >500 根），运行时报错：
+
+```
+Error on bar N: Bar index value of the `x1` argument (19) in `line.new()` is too far from the current bar index.
+```
+
+**解决方案**：用 `xloc=xloc.bar_time` + 存储时间戳。每记录一个拐点时同步存 `time`（Unix 毫秒），绘制时传入时间戳坐标。
+
+```pine
+// ❌ bar_index 太旧会报错
+line.new(oldBarIndex, price1, bar_index, price2)
+
+// ✅ 存储时间戳，用 bar_time 绘制
+var a1Time = array.new<int>()
+// 记录时：
+array.push(a1Time, time[offset])
+// 绘制时：
+line.new(t1, p1, t2, p2, xloc=xloc.bar_time, ...)
+label.new(t, price, text, xloc=xloc.bar_time, ...)
+```
+
+**注意**：如果用 `line.set_xy1/set_xy2` 更新已有线，坐标也要用时间戳（与创建时的 `xloc` 一致）。
 
 ## 8. 代码交付纪律
 
@@ -224,23 +296,6 @@ if len > 0
     for i = 0 to len - 1
         val := array.get(arr, i)
 ```
-
-## 6. 交易员隐性条件挖掘
-
-**用户（交易员）提供的形态条件是"肉眼标准"，不是"计算机标准"。**
-
-交易员说"这是个吞没形态"时，心里默认第二根明显更大，但不会专门说出来。代码按字面条件实现后，信号量够了但质量不行——因为隐性条件没挖出来。
-
-**每次设计指标时，条件讨论完后必须多问几个问题：**
-
-```
-1. 反例挖掘："满足这些条件、但你看到也不会认为是这个形态的情况有哪些？"
-2. 视觉直觉："这个形态肉眼看还有什么特征是自然而然、不需要特意说的？"
-3. 信号质量："这些信号够强吗？有没有勉强算但实际你不想看到的？"
-4. 强弱对比："关键K线和周围K线的大小对比要达到什么程度才叫'明显'？"
-```
-
-**让用户举反例比自己猜阈值更有效。** 比如问"什么样的情况勉强算吞没但其实不是你想要的"，比问"倍数设1.5还是2？"更能对齐预期。
 
 ## 10. 趋势结构设计原则（趋势识别指标专有）
 
@@ -348,3 +403,59 @@ findBoundary() =>
     else
         [na, false]
 ```
+
+**函数调用参数不能跨行（逗号续接）。** 与 `and`/`or` 运算符续接不同，函数调用参数末尾加逗号跨行会导致编译错误。必须把整个函数调用写在一行。
+
+```pine
+// ❌ 编译报错: Syntax error at input 'end of line without line continuation'
+line.new(bar1, price1, bar2, price2,
+         color=color.red, width=2)
+
+// ✅ 全部写在一行（即使很长）
+line.new(bar1, price1, bar2, price2, color=color.red, width=2)
+```
+
+**`indicator()` 的 `shorttitle` 不能超过 10 个字符。** 否则编译 warning。
+
+## 13. CDP 注入 Pine Script 到 TradingView 实操
+
+**前置条件**：TradingView 通过 CDP 端口 9222 运行。
+
+**注入方式**：使用 `C:\Users\Administrator\.claude\skills\pine-indicator-loader\scripts\inject_pine.js` 脚本，五步工作流：打开 Pine Editor → 注入代码 → Ctrl+S 保存 → 点击 Add to chart/Update on chart → 编译检查。
+
+**关键踩坑**：
+
+1. **Bash `-e` 不能直接写 CDP 脚本**。`$`、反引号等会被 bash 解释。任何复杂的 CDP 操作必须写 `.js` 文件再 `node xxx.js`，不能用 `node -e "..."`。
+
+2. **ESM vs CommonJS**。skill 目录的 `package.json` 没有 `"type": "module"`，但 `node -e` 在某些情况下会用 ESM 模式。文件方式执行 `.js` 时默认 CommonJS（`require` 可用）。
+
+3. **编译错误定位**：通过 Monaco editor markers 获取具体行号：
+   ```javascript
+   // 获取所有编译错误（severity=8）及其行列号
+   var m = FIND_MONACO();
+   var mo = m.editor.getModel();
+   var markers = m.env.editor.getModelMarkers({resource: mo.uri});
+   var errors = markers.filter(function(x) { return x.severity === 8 });
+   // 每个 error: { startLineNumber, startColumn, endLineNumber, endColumn, message }
+   ```
+
+4. **"Add to chart" 按钮查找**：匹配 `title` 属性（小写比对）：
+   - 首次添加：`title="Add to chart"`
+   - 修改后更新：`title="Update on chart"`
+   - 必须检查 `offsetParent !== null` 确保按钮可见
+   - 首次保存会弹出命名弹窗，需要先处理弹窗再点添加按钮
+
+5. **注入流程时序**：
+   - `setValue()` 后等待 300ms 再 `getValue()` 验证
+   - Ctrl+S 后等待 800ms 检查保存弹窗
+   - 弹窗确认后等待 500ms 再点 Add to chart
+   - 点 Add to chart 后等待 2500ms 再检查编译结果
+   - 编译检查前等待 1500ms 确保编译器处理完毕
+
+6. **注入脚本**：优先使用 skill 中的 `scripts/inject_pine.js`，它会自动处理五步流程。不要写临时 CDP 脚本再删除，直接用：`node C:/Users/Administrator/.claude/skills/pine-indicator-loader/scripts/inject_pine.js <pine_file>`。核心流程：
+   ```
+   Target.getTargets → Target.attachToTarget →
+   FIND_MONACO + setValue → getValue 验证 →
+   Ctrl+S → 检查弹窗 → Add to chart 按钮 →
+   getModelMarkers 检查编译
+   ```

@@ -1,0 +1,431 @@
+//@version=5
+indicator('ZigZag 双确认 [LH]', 'ZZ Dual', true, max_lines_count=500, max_labels_count=500, max_bars_back=501)
+
+// ===================================================================
+// 参数
+// ===================================================================
+
+// --- 算法一：ATR 过滤拐点 ---
+a1PivotLen = input.int(3, 'Pivot 长度', minval=3, maxval=501, step=2, group='算法一: ATR过滤', tooltip='必须为奇数，中位K线为最高/最低且左右均更低/更高')
+a1AtrLen   = input.int(20, 'ATR 周期', minval=1, group='算法一: ATR过滤')
+a1AtrMult  = input.float(3, 'ATR 倍数', minval=0, step=0.1, group='算法一: ATR过滤', tooltip='新拐点须距离上一拐点至少N倍ATR')
+
+// --- 算法二：ZigZag++ ---
+a2Depth     = input.int(12, 'Depth', minval=1, group='算法二: ZigZag++', tooltip='回溯深度，检测区间最高/最低')
+a2Deviation = input.int(5, 'Deviation', minval=1, group='算法二: ZigZag++', tooltip='最小偏差点数(基于mintick)')
+a2Backstep  = input.int(2, 'Backstep', minval=2, group='算法二: ZigZag++', tooltip='方向变化须持续N根K线确认')
+
+// --- 显示 ---
+lineWidth  = input.int(2, '线宽', minval=1, maxval=4, group='显示')
+upColor    = input.color(color.new(color.lime, 0), '上涨色', group='显示')
+dnColor    = input.color(color.new(color.red, 0), '下跌色', group='显示')
+showLabels = input.bool(true, '显示标签', group='显示')
+labelSizeStr = input.string('Small', '标签大小', ['Tiny', 'Small', 'Normal', 'Large', 'Huge'], group='显示')
+
+// ===================================================================
+// 算法一：ATR 过滤拐点检测
+// ===================================================================
+
+var a1Bar   = array.new<int>()
+var a1Price = array.new<float>()
+var a1Type  = array.new<string>()
+var a1Time  = array.new<int>()
+
+// 限制数组大小
+a1MaxSize = 500
+
+a1GarbageCollect() =>
+    while array.size(a1Bar) > a1MaxSize
+        array.shift(a1Bar)
+        array.shift(a1Price)
+        array.shift(a1Type)
+        array.shift(a1Time)
+
+a1Half = (a1PivotLen - 1) / 2
+a1Atr  = ta.atr(a1AtrLen)
+a1EnoughBars = bar_index >= a1PivotLen - 1 and a1PivotLen % 2 == 1
+
+a1NoHigh = false
+a1NoLow  = false
+
+if a1EnoughBars
+    for i = a1PivotLen - 1 to 1
+        if i > a1Half
+            if high[i] > high[i - 1]
+                a1NoHigh := true
+            if low[i] < low[i - 1]
+                a1NoLow := true
+        else
+            if high[i] < high[i - 1]
+                a1NoHigh := true
+            if low[i] > low[i - 1]
+                a1NoLow := true
+
+a1UpdateLast = false
+
+if a1EnoughBars
+    a1Sz = array.size(a1Bar)
+    if a1Sz != 0
+        lastA1Type = array.get(a1Type, a1Sz - 1)
+        if lastA1Type == 'High'
+            if not a1NoHigh and high[a1Half] > array.get(a1Price, a1Sz - 1)
+                array.set(a1Bar, a1Sz - 1, bar_index - a1Half)
+                array.set(a1Price, a1Sz - 1, high[a1Half])
+                array.set(a1Time, a1Sz - 1, time[a1Half])
+                a1UpdateLast := true
+            if not a1NoLow and
+               not na(a1Atr[a1Half]) and
+               math.abs(low[a1Half] - array.get(a1Price, a1Sz - 1)) >= a1Atr[a1Half] * a1AtrMult and
+               bar_index - a1Half != array.get(a1Bar, a1Sz - 1) and
+               low[a1Half] < array.get(a1Price, a1Sz - 1)
+                array.push(a1Bar, bar_index - a1Half)
+                array.push(a1Price, low[a1Half])
+                array.push(a1Type, 'Low')
+                array.push(a1Time, time[a1Half])
+        else
+            if not a1NoLow and low[a1Half] < array.get(a1Price, a1Sz - 1)
+                array.set(a1Bar, a1Sz - 1, bar_index - a1Half)
+                array.set(a1Price, a1Sz - 1, low[a1Half])
+                array.set(a1Time, a1Sz - 1, time[a1Half])
+                a1UpdateLast := true
+            if not a1NoHigh and
+               not na(a1Atr[a1Half]) and
+               math.abs(high[a1Half] - array.get(a1Price, a1Sz - 1)) >= a1Atr[a1Half] * a1AtrMult and
+               bar_index - a1Half != array.get(a1Bar, a1Sz - 1) and
+               high[a1Half] > array.get(a1Price, a1Sz - 1)
+                array.push(a1Bar, bar_index - a1Half)
+                array.push(a1Price, high[a1Half])
+                array.push(a1Type, 'High')
+                array.push(a1Time, time[a1Half])
+    else
+        if not a1NoHigh
+            array.push(a1Bar, bar_index - a1Half)
+            array.push(a1Price, high[a1Half])
+            array.push(a1Type, 'High')
+            array.push(a1Time, time[a1Half])
+        if not a1NoLow
+            array.push(a1Bar, bar_index - a1Half)
+            array.push(a1Price, low[a1Half])
+            array.push(a1Type, 'Low')
+            array.push(a1Time, time[a1Half])
+
+a1GarbageCollect()
+
+// ===================================================================
+// 算法二：ZigZag++ 拐点检测（bar_index 版本）
+// ===================================================================
+
+var a2Bar   = array.new<int>()
+var a2Price = array.new<float>()
+var a2Type  = array.new<string>()
+var a2Time  = array.new<int>()
+
+a2MaxSize = 500
+
+a2GarbageCollect() =>
+    while array.size(a2Bar) > a2MaxSize
+        array.shift(a2Bar)
+        array.shift(a2Price)
+        array.shift(a2Type)
+        array.shift(a2Time)
+
+var int   a2Dir      = 1
+var float a2Z2Price  = float(na)
+var int   a2Z2Bar    = int(na)
+var int   a2Z2Time   = int(na)
+var float a2ZPrice   = float(na)
+var int   a2ZBar     = int(na)
+var int   a2ZTime    = int(na)
+
+a2HighestSince = ta.highest(high, a2Depth)
+a2LowestSince  = ta.lowest(low, a2Depth)
+a2HighCond     = a2HighestSince - high > a2Deviation * syminfo.mintick
+a2LowCond      = low - a2LowestSince > a2Deviation * syminfo.mintick
+a2Hr           = ta.barssince(not a2HighCond[1])
+a2Lr           = ta.barssince(not a2LowCond[1])
+a2NewDir       = ta.barssince(not (a2Hr > a2Lr)) >= a2Backstep ? -1 : 1
+
+a2DirChanged = ta.change(a2NewDir)
+
+if a2DirChanged
+    if not na(a2Z2Price)
+        a2PivotType = a2Dir > 0 ? 'High' : 'Low'
+        array.push(a2Bar, a2Z2Bar)
+        array.push(a2Price, a2Z2Price)
+        array.push(a2Type, a2PivotType)
+        array.push(a2Time, a2Z2Time)
+    a2Dir := a2NewDir
+    a2Z2Price := a2ZPrice
+    a2Z2Bar   := a2ZBar
+    a2Z2Time  := a2ZTime
+else
+    a2Dir := a2NewDir
+
+if a2Dir > 0
+    if na(a2Z2Price) or high > a2Z2Price
+        a2Z2Price := high
+        a2Z2Bar   := bar_index
+        a2Z2Time  := time
+        a2ZPrice  := close
+        a2ZBar    := bar_index
+        a2ZTime   := time
+    else if na(a2ZPrice) or low < a2ZPrice
+        a2ZPrice  := low
+        a2ZBar    := bar_index
+        a2ZTime   := time
+else if a2Dir < 0
+    if na(a2Z2Price) or low < a2Z2Price
+        a2Z2Price := low
+        a2Z2Bar   := bar_index
+        a2Z2Time  := time
+        a2ZPrice  := close
+        a2ZBar    := bar_index
+        a2ZTime   := time
+    else if na(a2ZPrice) or high > a2ZPrice
+        a2ZPrice  := high
+        a2ZBar    := bar_index
+        a2ZTime   := time
+
+a2GarbageCollect()
+
+// ===================================================================
+// 合并逻辑：取交集确认点 + 争议段解析
+// ===================================================================
+
+var mergedBar   = array.new<int>()
+var mergedPrice = array.new<float>()
+var mergedType  = array.new<string>()
+var mergedTime  = array.new<int>()
+
+// 检测两个子算法是否有变化
+var int  prevA1Sz       = -1
+var int  prevA2Sz       = -1
+var int  prevA1LastBar  = -1
+var int  prevA2LastBar  = -1
+
+a1CurSz = array.size(a1Bar)
+a2CurSz = array.size(a2Bar)
+a1CurLastBar = a1CurSz > 0 ? array.get(a1Bar, a1CurSz - 1) : -1
+a2CurLastBar = a2CurSz > 0 ? array.get(a2Bar, a2CurSz - 1) : -1
+
+needMerge = a1CurSz != prevA1Sz or a2CurSz != prevA2Sz or a1CurLastBar != prevA1LastBar or a2CurLastBar != prevA2LastBar
+
+if needMerge
+    // --- 重建合并序列 ---
+    array.clear(mergedBar)
+    array.clear(mergedPrice)
+    array.clear(mergedType)
+    array.clear(mergedTime)
+
+    a1Len = array.size(a1Bar)
+    a2Len = array.size(a2Bar)
+
+    notEmpty = a1Len > 0 and a2Len > 0
+
+    if notEmpty
+        // Step 1: 找确认点（同 bar_index + 同类型）
+        confirmed = array.new<int>()
+
+        for i = 0 to a1Len - 1
+            a1B = array.get(a1Bar, i)
+            a1T = array.get(a1Type, i)
+            foundMatch = false
+            for j = 0 to a2Len - 1
+                if not foundMatch and
+                   array.get(a2Bar, j) == a1B and
+                   array.get(a2Type, j) == a1T
+                    array.push(confirmed, i)
+                    array.push(confirmed, j)
+                    foundMatch := true
+            // foundMatch 无需 else，内层循环结束自动继续外层
+
+        cCount = array.size(confirmed) / 2
+
+        if cCount > 0
+            // Step 2: 遍历确认点，处理争议段
+            for c = 0 to cCount - 1
+                i1 = array.get(confirmed, c * 2)
+                j1 = array.get(confirmed, c * 2 + 1)
+
+                curBarP   = array.get(a1Bar, i1)
+                curPriceP = array.get(a1Price, i1)
+                curTypeP  = array.get(a1Type, i1)
+
+                mSize = array.size(mergedBar)
+
+                if mSize == 0
+                    // 第一个确认点直接添加
+                    array.push(mergedBar, curBarP)
+                    array.push(mergedPrice, curPriceP)
+                    array.push(mergedType, curTypeP)
+                    array.push(mergedTime, array.get(a1Time, i1))
+                else
+                    prevTypeP = array.get(mergedType, mSize - 1)
+
+                    if curTypeP == prevTypeP
+                        // 同类型确认点 → 需要插入中间反向点
+                        oppType = curTypeP == 'High' ? 'Low' : 'High'
+
+                        prevC  = c - 1
+                        prevI1 = array.get(confirmed, prevC * 2)
+                        prevJ1 = array.get(confirmed, prevC * 2 + 1)
+
+                        bestBar   = int(na)
+                        bestPrice = oppType == 'High' ? -1e10 : 1e10
+                        bestTime  = int(na)
+
+                        // 搜索算法一
+                        if i1 > prevI1 + 1
+                            for k = prevI1 + 1 to i1 - 1
+                                if array.get(a1Type, k) == oppType
+                                    kPrice = array.get(a1Price, k)
+                                    better = oppType == 'High' ? kPrice > bestPrice : kPrice < bestPrice
+                                    if better
+                                        bestPrice := kPrice
+                                        bestBar   := array.get(a1Bar, k)
+                                        bestTime  := array.get(a1Time, k)
+
+                        // 搜索算法二
+                        if j1 > prevJ1 + 1
+                            for k = prevJ1 + 1 to j1 - 1
+                                if array.get(a2Type, k) == oppType
+                                    kPrice = array.get(a2Price, k)
+                                    better = oppType == 'High' ? kPrice > bestPrice : kPrice < bestPrice
+                                    if better
+                                        bestPrice := kPrice
+                                        bestBar   := array.get(a2Bar, k)
+                                        bestTime  := array.get(a2Time, k)
+
+                        // 插入争议解决后的反向点
+                        if not na(bestBar)
+                            array.push(mergedBar, bestBar)
+                            array.push(mergedPrice, bestPrice)
+                            array.push(mergedType, oppType)
+                            array.push(mergedTime, bestTime)
+
+                    // 添加当前确认点
+                    array.push(mergedBar, curBarP)
+                    array.push(mergedPrice, curPriceP)
+                    array.push(mergedType, curTypeP)
+                    array.push(mergedTime, array.get(a1Time, i1))
+
+    prevA1Sz      := a1CurSz
+    prevA2Sz      := a2CurSz
+    prevA1LastBar := a1CurLastBar
+    prevA2LastBar := a2CurLastBar
+
+// ===================================================================
+// 绘制
+// ===================================================================
+
+// --- 线段 ---
+var line[] mergedLines = array.new<line>()
+
+var int  prevMSize    = -1
+var int  prevMLastBar = -1
+
+mSize    = array.size(mergedBar)
+mLastBar = mSize > 0 ? array.get(mergedBar, mSize - 1) : -1
+
+needRebuildLines = mSize != prevMSize or mLastBar != prevMLastBar
+
+if needRebuildLines
+    // 删除旧线
+    llSize = array.size(mergedLines)
+    if llSize > 0
+        for i = 0 to llSize - 1
+            line.delete(array.get(mergedLines, i))
+        array.clear(mergedLines)
+
+    // 创建新线：相邻合并点两两连接（xloc.bar_time 避免历史坐标越界）
+    if mSize > 1
+        for i = 1 to mSize - 1
+            t1 = array.get(mergedTime, i - 1)
+            p1 = array.get(mergedPrice, i - 1)
+            t2 = array.get(mergedTime, i)
+            p2 = array.get(mergedPrice, i)
+            segType = array.get(mergedType, i)
+            lColor  = segType == 'High' ? dnColor : upColor
+            newLine = line.new(t1, p1, t2, p2, xloc=xloc.bar_time, color=lColor, width=lineWidth)
+            array.push(mergedLines, newLine)
+
+    prevMSize    := mSize
+    prevMLastBar := mLastBar
+
+// --- 标签 ---
+lblSz = switch labelSizeStr
+    'Tiny'   => size.tiny
+    'Small'  => size.small
+    'Normal' => size.normal
+    'Large'  => size.large
+    =>          size.huge
+
+var label[] mergedLabels = array.new<label>()
+
+if needRebuildLines
+    // 删除旧标签
+    lbSize = array.size(mergedLabels)
+    if lbSize > 0
+        for i = 0 to lbSize - 1
+            label.delete(array.get(mergedLabels, i))
+        array.clear(mergedLabels)
+
+    // 创建新标签
+    if showLabels and mSize > 0
+        for i = 0 to mSize - 1
+            mTime  = array.get(mergedTime, i)
+            mPrice = array.get(mergedPrice, i)
+            mType  = array.get(mergedType, i)
+
+            // 判断 HH/HL/LH/LL（基于合并序列自身的前一个同类型点）
+            trendLabel = mType
+            prevSamePrice = 0.0
+            foundPrev = false
+            j = 0
+            while j < i and not foundPrev
+                if array.get(mergedType, j) == mType
+                    prevSamePrice := array.get(mergedPrice, j)
+                    foundPrev := true
+                j += 1
+
+            if foundPrev
+                if mType == 'High'
+                    trendLabel := mPrice > prevSamePrice ? 'HH' : mPrice < prevSamePrice ? 'LH' : 'EH'
+                else
+                    trendLabel := mPrice > prevSamePrice ? 'HL' : mPrice < prevSamePrice ? 'LL' : 'EL'
+
+            lblColor = mType == 'High' ? dnColor : upColor
+            lblStyle = mType == 'High' ? label.style_label_down : label.style_label_up
+            txt = str.tostring(mPrice, format.mintick) + '\n' + trendLabel
+
+            newLabel = label.new(mTime, mPrice, txt, xloc=xloc.bar_time, style=lblStyle, size=lblSz, color=lblColor, textcolor=color.white)
+            array.push(mergedLabels, newLabel)
+
+// --- 潜在线：从最后合并点连到前一根K线收盘价 ---
+var line potLine = na
+var label potLabel = na
+
+if mSize > 0
+    lastTime   = array.get(mergedTime, mSize - 1)
+    lastPriceP = array.get(mergedPrice, mSize - 1)
+    targetTime  = time[1]
+    targetPrice = close[1]
+
+    if na(potLine)
+        potLine := line.new(lastTime, lastPriceP, targetTime, targetPrice, xloc=xloc.bar_time, color=color.new(color.gray, 40), style=line.style_dashed, width=1)
+    else
+        line.set_xy1(potLine, lastTime, lastPriceP)
+        line.set_xy2(potLine, targetTime, targetPrice)
+
+    if na(potLabel)
+        potLabel := label.new(targetTime, targetPrice, str.tostring(targetPrice, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, size=size.small, color=color.new(color.gray, 60), textcolor=color.gray)
+    else
+        label.set_xy(potLabel, targetTime, targetPrice)
+        label.set_text(potLabel, str.tostring(targetPrice, format.mintick))
+else
+    if not na(potLine)
+        line.delete(potLine)
+        potLine := na
+    if not na(potLabel)
+        label.delete(potLabel)
+        potLabel := na
