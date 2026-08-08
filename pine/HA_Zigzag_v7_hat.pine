@@ -1,0 +1,223 @@
+//@version=5
+indicator("HA Zigzag v7 — HAT Z", overlay=true, max_lines_count=500, max_labels_count=200)
+
+// ═══ 参数 ═══
+t3Len      = input.int(7, "T3 平滑长度", minval=1, maxval=50)
+showLines  = input.bool(true, "显示折线")
+showLabels = input.bool(true, "显示拐点标记")
+maxPivots  = input.int(200, "最大拐点数", minval=20, maxval=500)
+
+// ═══ Heikin Ashi ═══
+haClose = (open + high + low + close) / 4.0
+var float haOpen = float(na)
+haOpen := na(haOpen[1]) ? (open + close) / 2.0 : (haOpen[1] + haClose[1]) / 2.0
+haHigh = math.max(high, haOpen, haClose)
+haLow  = math.min(low, haOpen, haClose)
+
+// ═══ T3 平滑 (factor=0 → 三重EMA) ═══
+t3Smooth(src, length) =>
+    e1 = ta.ema(src, length)
+    e2 = ta.ema(e1, length)
+    ta.ema(e2, length)
+
+o2 = t3Smooth(haOpen, t3Len)
+c2 = t3Smooth(haClose, t3Len)
+h2 = t3Smooth(haHigh, t3Len)
+l2 = t3Smooth(haLow, t3Len)
+
+// ═══ 趋势段追踪 ═══
+var int dir = 0
+
+bullUp   = c2 > o2
+bearDown = c2 < o2
+
+toUp   = (dir == -1 and bullUp) or (dir == 0 and bullUp)
+toDown = (dir == 1 and bearDown) or (dir == 0 and bearDown)
+
+// ═══ 拐点数组 ═══
+var int[]   pivType  = array.new<int>()
+var float[] pivPrice = array.new<float>()
+var int[]   pivTime  = array.new<int>()
+var int[]   pivIdx   = array.new<int>()      // bar_index
+
+var int lastHighIdx = -1
+var int lastLowIdx  = -1
+
+// 辅助函数: 在[fromIdx, toIdx]范围找最高/最低 (最大扫描1000 bar)
+findHighest(fromIdx, toIdx) =>
+    result    = high
+    resultIdx = bar_index
+    n         = math.min(bar_index - fromIdx, 1000)
+    for i = 1 to n
+        if high[i] > result
+            result    := high[i]
+            resultIdx := bar_index - i
+    [result, resultIdx]
+
+findLowest(fromIdx, toIdx) =>
+    result    = low
+    resultIdx = bar_index
+    n         = math.min(bar_index - fromIdx, 1000)
+    for i = 1 to n
+        if low[i] < result
+            result    := low[i]
+            resultIdx := bar_index - i
+    [result, resultIdx]
+
+// toDown(涨→跌):  从上一LOW bar到现在 → 取最高点 → HIGH
+if toDown and dir == 1
+    if lastLowIdx >= 0
+        [hhVal, hhIdx] = findHighest(lastLowIdx, bar_index)
+        hhTime = time[bar_index - hhIdx]
+        array.push(pivType, 1)
+        array.push(pivPrice, hhVal)
+        array.push(pivTime, hhTime)
+        array.push(pivIdx, hhIdx)
+        lastHighIdx := hhIdx
+
+// toUp(跌→涨):  从上一HIGH bar到现在 → 取最低点 → LOW
+if toUp and dir == -1
+    if lastHighIdx >= 0
+        [llVal, llIdx] = findLowest(lastHighIdx, bar_index)
+        llTime = time[bar_index - llIdx]
+        array.push(pivType, -1)
+        array.push(pivPrice, llVal)
+        array.push(pivTime, llTime)
+        array.push(pivIdx, llIdx)
+        lastLowIdx := llIdx
+
+// 首次：尚无对面拐点 → 从bar 0到现在取极端
+if toDown and dir == 0
+    [hhVal, hhIdx] = findHighest(0, bar_index)
+    hhTime = time[bar_index - hhIdx]
+    array.push(pivType, 1)
+    array.push(pivPrice, hhVal)
+    array.push(pivTime, hhTime)
+    array.push(pivIdx, hhIdx)
+    lastHighIdx := hhIdx
+
+if toUp and dir == 0
+    [llVal, llIdx] = findLowest(0, bar_index)
+    llTime = time[bar_index - llIdx]
+    array.push(pivType, -1)
+    array.push(pivPrice, llVal)
+    array.push(pivTime, llTime)
+    array.push(pivIdx, llIdx)
+    lastLowIdx := llIdx
+
+// 同向合并
+if toUp or toDown
+    fxN = array.size(pivType)
+    while fxN >= 2
+        t1 = array.get(pivType, fxN - 2)
+        t2 = array.get(pivType, fxN - 1)
+        if t1 != t2
+            break
+        p1 = array.get(pivPrice, fxN - 2)
+        p2 = array.get(pivPrice, fxN - 1)
+        if t1 == 1
+            if p2 > p1
+                array.remove(pivType, fxN - 2)
+                array.remove(pivPrice, fxN - 2)
+                array.remove(pivTime, fxN - 2)
+                array.remove(pivIdx, fxN - 2)
+            else
+                array.pop(pivType)
+                array.pop(pivPrice)
+                array.pop(pivTime)
+                array.pop(pivIdx)
+        else
+            if p2 < p1
+                array.remove(pivType, fxN - 2)
+                array.remove(pivPrice, fxN - 2)
+                array.remove(pivTime, fxN - 2)
+                array.remove(pivIdx, fxN - 2)
+            else
+                array.pop(pivType)
+                array.pop(pivPrice)
+                array.pop(pivTime)
+                array.pop(pivIdx)
+        fxN := array.size(pivType)
+
+// 更新方向
+if toUp
+    dir := 1
+
+if toDown
+    dir := -1
+
+// 限制数量
+while array.size(pivType) > maxPivots
+    array.remove(pivType, 0)
+    array.remove(pivPrice, 0)
+    array.remove(pivTime, 0)
+
+// ═══ 绘制折线 ═══
+var line[] zigLines = array.new<line>()
+
+drawZigLines() =>
+    for l in zigLines
+        line.delete(l)
+    array.clear(zigLines)
+
+    n = array.size(pivType)
+    if n >= 2
+        for i = 0 to n - 2
+            x1 = array.get(pivTime, i)
+            y1 = array.get(pivPrice, i)
+            x2 = array.get(pivTime, i + 1)
+            y2 = array.get(pivPrice, i + 1)
+            l = line.new(x1, y1, x2, y2, xloc=xloc.bar_time, color=color.blue, width=2)
+            array.push(zigLines, l)
+
+    // 当前活跃段虚线: 从最后拐点到当前bar极值
+    if n >= 1 and dir != 0 and barstate.islast
+        x1      = array.get(pivTime, n - 1)
+        y1      = array.get(pivPrice, n - 1)
+        lastIdx = array.get(pivIdx, n - 1)
+        curExtVal  = float(na)
+        curExtTime = int(na)
+        if dir == 1
+            [hVal, hIdx] = findHighest(lastIdx, bar_index)
+            curExtVal  := hVal
+            curExtTime := time[bar_index - hIdx]
+        else
+            [lVal, lIdx] = findLowest(lastIdx, bar_index)
+            curExtVal  := lVal
+            curExtTime := time[bar_index - lIdx]
+        if not na(curExtVal)
+            l = line.new(x1, y1, curExtTime, curExtVal, xloc=xloc.bar_time, color=color.blue, width=1, style=line.style_dashed)
+            array.push(zigLines, l)
+
+if showLines
+    drawZigLines()
+else
+    if array.size(zigLines) > 0
+        for l in zigLines
+            line.delete(l)
+        array.clear(zigLines)
+
+// ═══ 拐点标记 ═══
+var label[] zigLabels = array.new<label>()
+nPiv = array.size(pivType)
+if showLabels and nPiv > 0
+    for lb in zigLabels
+        label.delete(lb)
+    array.clear(zigLabels)
+    for i = 0 to nPiv - 1
+        t   = array.get(pivTime, i)
+        p   = array.get(pivPrice, i)
+        tp  = array.get(pivType, i)
+        txt = tp == 1 ? "H" : "L"
+        clr = tp == 1 ? color.red : color.green
+        sty = tp == 1 ? label.style_label_down : label.style_label_up
+        label.new(t, p, txt, xloc=xloc.bar_time, color=clr, textcolor=color.white, style=sty, size=size.small)
+
+// ═══ 调试 ═══
+var table dbg = table.new(position.top_right, 2, 3, border_width=1)
+if barstate.islast
+    n = array.size(pivType)
+    table.cell(dbg, 0, 0, "HA Zigzag v7", text_color=color.white)
+    table.cell(dbg, 0, 1, "拐点: " + str.tostring(n), text_color=color.white)
+    table.cell(dbg, 1, 1, "T3Len: " + str.tostring(t3Len), text_color=color.white)
+    table.cell(dbg, 0, 2, "方向: " + (dir == 1 ? "涨" : dir == -1 ? "跌" : "—"), text_color=color.white)
