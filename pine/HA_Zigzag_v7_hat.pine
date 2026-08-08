@@ -94,7 +94,7 @@ toUp20   = (dir20 == -1 and bull20) or (dir20 == 0 and bull20)
 toDown20 = (dir20 == 1 and bear20) or (dir20 == 0 and bear20)
 
 if toDown20 and dir20 == 1 and lastLow20 >= 0
-    [hh, hhIdx] = findHighest(bar_index - lastLow20, 2000)
+    [hh, hhIdx] = findHighest(bar_index - lastLow20 - 1, 2000)
     array.push(typ20, 1)
     array.push(prc20, hh)
     array.push(tim20, time[bar_index - hhIdx])
@@ -102,7 +102,7 @@ if toDown20 and dir20 == 1 and lastLow20 >= 0
     lastHigh20 := hhIdx
 
 if toUp20 and dir20 == -1 and lastHigh20 >= 0
-    [ll, llIdx] = findLowest(bar_index - lastHigh20, 2000)
+    [ll, llIdx] = findLowest(bar_index - lastHigh20 - 1, 2000)
     array.push(typ20, -1)
     array.push(prc20, ll)
     array.push(tim20, time[bar_index - llIdx])
@@ -110,7 +110,7 @@ if toUp20 and dir20 == -1 and lastHigh20 >= 0
     lastLow20 := llIdx
 
 if toDown20 and dir20 == 0
-    [hh, hhIdx] = findHighest(bar_index, 2000)
+    [hh, hhIdx] = findHighest(bar_index - 1, 2000)
     array.push(typ20, 1)
     array.push(prc20, hh)
     array.push(tim20, time[bar_index - hhIdx])
@@ -118,7 +118,7 @@ if toDown20 and dir20 == 0
     lastHigh20 := hhIdx
 
 if toUp20 and dir20 == 0
-    [ll, llIdx] = findLowest(bar_index, 2000)
+    [ll, llIdx] = findLowest(bar_index - 1, 2000)
     array.push(typ20, -1)
     array.push(prc20, ll)
     array.push(tim20, time[bar_index - llIdx])
@@ -157,7 +157,7 @@ toUp15   = (dir15 == -1 and bull15) or (dir15 == 0 and bull15)
 toDown15 = (dir15 == 1 and bear15) or (dir15 == 0 and bear15)
 
 if toDown15 and dir15 == 1 and lastLow15 >= 0
-    [hh, hhIdx] = findHighest(bar_index - lastLow15, 1500)
+    [hh, hhIdx] = findHighest(bar_index - lastLow15 - 1, 1500)
     array.push(typ15, 1)
     array.push(prc15, hh)
     array.push(tim15, time[bar_index - hhIdx])
@@ -165,7 +165,7 @@ if toDown15 and dir15 == 1 and lastLow15 >= 0
     lastHigh15 := hhIdx
 
 if toUp15 and dir15 == -1 and lastHigh15 >= 0
-    [ll, llIdx] = findLowest(bar_index - lastHigh15, 1500)
+    [ll, llIdx] = findLowest(bar_index - lastHigh15 - 1, 1500)
     array.push(typ15, -1)
     array.push(prc15, ll)
     array.push(tim15, time[bar_index - llIdx])
@@ -173,7 +173,7 @@ if toUp15 and dir15 == -1 and lastHigh15 >= 0
     lastLow15 := llIdx
 
 if toDown15 and dir15 == 0
-    [hh, hhIdx] = findHighest(bar_index, 1500)
+    [hh, hhIdx] = findHighest(bar_index - 1, 1500)
     array.push(typ15, 1)
     array.push(prc15, hh)
     array.push(tim15, time[bar_index - hhIdx])
@@ -181,7 +181,7 @@ if toDown15 and dir15 == 0
     lastHigh15 := hhIdx
 
 if toUp15 and dir15 == 0
-    [ll, llIdx] = findLowest(bar_index, 1500)
+    [ll, llIdx] = findLowest(bar_index - 1, 1500)
     array.push(typ15, -1)
     array.push(prc15, ll)
     array.push(tim15, time[bar_index - llIdx])
@@ -220,7 +220,7 @@ toUp10   = (dir10 == -1 and bull10) or (dir10 == 0 and bull10)
 toDown10 = (dir10 == 1 and bear10) or (dir10 == 0 and bear10)
 
 if toDown10 and dir10 == 1 and lastLow10 >= 0
-    [hh, hhIdx] = findHighest(bar_index - lastLow10, 1000)
+    [hh, hhIdx] = findHighest(bar_index - lastLow10 - 1, 1000)
     array.push(typ10, 1)
     array.push(prc10, hh)
     array.push(tim10, time[bar_index - hhIdx])
@@ -228,7 +228,7 @@ if toDown10 and dir10 == 1 and lastLow10 >= 0
     lastHigh10 := hhIdx
 
 if toUp10 and dir10 == -1 and lastHigh10 >= 0
-    [ll, llIdx] = findLowest(bar_index - lastHigh10, 1000)
+    [ll, llIdx] = findLowest(bar_index - lastHigh10 - 1, 1000)
     array.push(typ10, -1)
     array.push(prc10, ll)
     array.push(tim10, time[bar_index - llIdx])
@@ -236,7 +236,7 @@ if toUp10 and dir10 == -1 and lastHigh10 >= 0
     lastLow10 := llIdx
 
 if toDown10 and dir10 == 0
-    [hh, hhIdx] = findHighest(bar_index, 1000)
+    [hh, hhIdx] = findHighest(bar_index - 1, 1000)
     array.push(typ10, 1)
     array.push(prc10, hh)
     array.push(tim10, time[bar_index - hhIdx])
@@ -244,7 +244,7 @@ if toDown10 and dir10 == 0
     lastHigh10 := hhIdx
 
 if toUp10 and dir10 == 0
-    [ll, llIdx] = findLowest(bar_index, 1000)
+    [ll, llIdx] = findLowest(bar_index - 1, 1000)
     array.push(typ10, -1)
     array.push(prc10, ll)
     array.push(tim10, time[bar_index - llIdx])
@@ -303,21 +303,29 @@ if barstate.islast
 
             useAlt = false
             if p15_s >= 0 and p15_e >= 0 and p10_s >= 0 and p10_e >= 0
-                cnt15 = p15_e - p15_s + 1
-                cnt10 = p10_e - p10_s + 1
-                if cnt15 == cnt10
-                    match = true
-                    for k = 0 to cnt15 - 1
-                        if array.get(idx15, p15_s + k) != array.get(idx10, p10_s + k)
-                            match := false
-                            break
-                    if match
-                        useAlt := true
-                        // 加15的拐点 — 跳过第一个(已作为上一段的end或第一个加入)
-                        for k = p15_s + 1 to p15_e
-                            array.push(mrgType, array.get(typ15, k))
-                            array.push(mrgPrice, array.get(prc15, k))
-                            array.push(mrgTime, array.get(tim15, k))
+                // 端点类型必须与20一致
+                t20_s = array.get(typ20, i)
+                t20_e = array.get(typ20, i + 1)
+                t15_s = array.get(typ15, p15_s)
+                t15_e = array.get(typ15, p15_e)
+                t10_s = array.get(typ10, p10_s)
+                t10_e = array.get(typ10, p10_e)
+                typesMatch = t20_s == t15_s and t20_s == t10_s and t20_e == t15_e and t20_e == t10_e
+                if typesMatch
+                    cnt15 = p15_e - p15_s + 1
+                    cnt10 = p10_e - p10_s + 1
+                    if cnt15 == cnt10
+                        match = true
+                        for k = 0 to cnt15 - 1
+                            if array.get(idx15, p15_s + k) != array.get(idx10, p10_s + k)
+                                match := false
+                                break
+                        if match
+                            useAlt := true
+                            for k = p15_s + 1 to p15_e
+                                array.push(mrgType, array.get(typ15, k))
+                                array.push(mrgPrice, array.get(prc15, k))
+                                array.push(mrgTime, array.get(tim15, k))
 
             if not useAlt
                 // 只加端点(20的下一拐点)
