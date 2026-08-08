@@ -1,158 +1,333 @@
 //@version=5
-indicator("HA Zigzag v7 — HAT Z", overlay=true, max_lines_count=500, max_labels_count=200)
+indicator("HA Zigzag v7 — MTF确认", overlay=true, max_lines_count=500, max_labels_count=200)
 
 // ═══ 参数 ═══
-t3Len      = input.int(7, "T3 平滑长度", minval=1, maxval=50)
 showLines  = input.bool(true, "显示折线")
 showLabels = input.bool(true, "显示拐点标记")
-maxPivots  = input.int(200, "最大拐点数", minval=20, maxval=500)
+maxPivots  = input.int(500, "最大拐点数", minval=20, maxval=1000)
 
 // ═══ Heikin Ashi ═══
 haClose = (open + high + low + close) / 4.0
 var float haOpen = float(na)
 haOpen := na(haOpen[1]) ? (open + close) / 2.0 : (haOpen[1] + haClose[1]) / 2.0
-haHigh = math.max(high, haOpen, haClose)
-haLow  = math.min(low, haOpen, haClose)
 
-// ═══ T3 平滑 (factor=0 → 三重EMA) ═══
+// ═══ T3 平滑 ═══
 t3Smooth(src, length) =>
     e1 = ta.ema(src, length)
     e2 = ta.ema(e1, length)
     ta.ema(e2, length)
 
-o2 = t3Smooth(haOpen, t3Len)
-c2 = t3Smooth(haClose, t3Len)
-h2 = t3Smooth(haHigh, t3Len)
-l2 = t3Smooth(haLow, t3Len)
-
-// ═══ 趋势段追踪 ═══
-var int dir = 0
-
-bullUp   = c2 > o2
-bearDown = c2 < o2
-
-toUp   = (dir == -1 and bullUp) or (dir == 0 and bullUp)
-toDown = (dir == 1 and bearDown) or (dir == 0 and bearDown)
-
-// ═══ 拐点数组 ═══
-var int[]   pivType  = array.new<int>()
-var float[] pivPrice = array.new<float>()
-var int[]   pivTime  = array.new<int>()
-var int[]   pivIdx   = array.new<int>()      // bar_index
-
-var int lastHighIdx = -1
-var int lastLowIdx  = -1
-
-// 辅助函数: 在[fromIdx, toIdx]范围找最高/最低 (最大扫描1000 bar)
-findHighest(fromIdx, toIdx) =>
+// ═══ 辅助: 范围内找最高/最低 ═══
+findHighest(back, maxBars) =>
     result    = high
     resultIdx = bar_index
-    n         = math.min(bar_index - fromIdx, 1000)
+    n         = math.min(back, maxBars)
     for i = 1 to n
         if high[i] > result
             result    := high[i]
             resultIdx := bar_index - i
     [result, resultIdx]
 
-findLowest(fromIdx, toIdx) =>
+findLowest(back, maxBars) =>
     result    = low
     resultIdx = bar_index
-    n         = math.min(bar_index - fromIdx, 1000)
+    n         = math.min(back, maxBars)
     for i = 1 to n
         if low[i] < result
             result    := low[i]
             resultIdx := bar_index - i
     [result, resultIdx]
 
-// toDown(涨→跌):  从上一LOW bar到现在 → 取最高点 → HIGH
-if toDown and dir == 1
-    if lastLowIdx >= 0
-        [hhVal, hhIdx] = findHighest(lastLowIdx, bar_index)
-        hhTime = time[bar_index - hhIdx]
-        array.push(pivType, 1)
-        array.push(pivPrice, hhVal)
-        array.push(pivTime, hhTime)
-        array.push(pivIdx, hhIdx)
-        lastHighIdx := hhIdx
+// ═══ 合并去重辅助 ═══
+mergeRemove(arrT, arrP, arrM, idx) =>
+    array.remove(arrT, idx)
+    array.remove(arrP, idx)
+    array.remove(arrM, idx)
 
-// toUp(跌→涨):  从上一HIGH bar到现在 → 取最低点 → LOW
-if toUp and dir == -1
-    if lastHighIdx >= 0
-        [llVal, llIdx] = findLowest(lastHighIdx, bar_index)
-        llTime = time[bar_index - llIdx]
-        array.push(pivType, -1)
-        array.push(pivPrice, llVal)
-        array.push(pivTime, llTime)
-        array.push(pivIdx, llIdx)
-        lastLowIdx := llIdx
+mergePop(arrT, arrP, arrM) =>
+    array.pop(arrT)
+    array.pop(arrP)
+    array.pop(arrM)
 
-// 首次：尚无对面拐点 → 从bar 0到现在取极端
-if toDown and dir == 0
-    [hhVal, hhIdx] = findHighest(0, bar_index)
-    hhTime = time[bar_index - hhIdx]
-    array.push(pivType, 1)
-    array.push(pivPrice, hhVal)
-    array.push(pivTime, hhTime)
-    array.push(pivIdx, hhIdx)
-    lastHighIdx := hhIdx
-
-if toUp and dir == 0
-    [llVal, llIdx] = findLowest(0, bar_index)
-    llTime = time[bar_index - llIdx]
-    array.push(pivType, -1)
-    array.push(pivPrice, llVal)
-    array.push(pivTime, llTime)
-    array.push(pivIdx, llIdx)
-    lastLowIdx := llIdx
-
-// 同向合并
-if toUp or toDown
-    fxN = array.size(pivType)
+doMerge(arrT, arrP, arrM, arrI) =>
+    fxN = array.size(arrT)
     while fxN >= 2
-        t1 = array.get(pivType, fxN - 2)
-        t2 = array.get(pivType, fxN - 1)
+        t1 = array.get(arrT, fxN - 2)
+        t2 = array.get(arrT, fxN - 1)
         if t1 != t2
             break
-        p1 = array.get(pivPrice, fxN - 2)
-        p2 = array.get(pivPrice, fxN - 1)
+        p1 = array.get(arrP, fxN - 2)
+        p2 = array.get(arrP, fxN - 1)
         if t1 == 1
             if p2 > p1
-                array.remove(pivType, fxN - 2)
-                array.remove(pivPrice, fxN - 2)
-                array.remove(pivTime, fxN - 2)
-                array.remove(pivIdx, fxN - 2)
+                mergeRemove(arrT, arrP, arrM, fxN - 2)
+                array.remove(arrI, fxN - 2)
             else
-                array.pop(pivType)
-                array.pop(pivPrice)
-                array.pop(pivTime)
-                array.pop(pivIdx)
+                mergePop(arrT, arrP, arrM)
+                array.pop(arrI)
         else
             if p2 < p1
-                array.remove(pivType, fxN - 2)
-                array.remove(pivPrice, fxN - 2)
-                array.remove(pivTime, fxN - 2)
-                array.remove(pivIdx, fxN - 2)
+                mergeRemove(arrT, arrP, arrM, fxN - 2)
+                array.remove(arrI, fxN - 2)
             else
-                array.pop(pivType)
-                array.pop(pivPrice)
-                array.pop(pivTime)
-                array.pop(pivIdx)
-        fxN := array.size(pivType)
+                mergePop(arrT, arrP, arrM)
+                array.pop(arrI)
+        fxN := array.size(arrT)
 
-// 更新方向
-if toUp
-    dir := 1
+// ══════════════════════════════════════════════
+//  T3=20 主框架
+// ══════════════════════════════════════════════
+o20 = t3Smooth(haOpen, 20)
+c20 = t3Smooth(haClose, 20)
 
-if toDown
-    dir := -1
+var int   dir20      = 0
+var int[] typ20      = array.new<int>()
+var float[] prc20    = array.new<float>()
+var int[] tim20      = array.new<int>()
+var int[] idx20      = array.new<int>()
+var int   lastLow20  = -1
+var int   lastHigh20 = -1
 
-// 限制数量
-while array.size(pivType) > maxPivots
-    array.remove(pivType, 0)
-    array.remove(pivPrice, 0)
-    array.remove(pivTime, 0)
+bull20   = c20 > o20
+bear20   = c20 < o20
+toUp20   = (dir20 == -1 and bull20) or (dir20 == 0 and bull20)
+toDown20 = (dir20 == 1 and bear20) or (dir20 == 0 and bear20)
 
-// ═══ 绘制折线 ═══
+if toDown20 and dir20 == 1 and lastLow20 >= 0
+    [hh, hhIdx] = findHighest(bar_index - lastLow20, 2000)
+    array.push(typ20, 1)
+    array.push(prc20, hh)
+    array.push(tim20, time[bar_index - hhIdx])
+    array.push(idx20, hhIdx)
+    lastHigh20 := hhIdx
+
+if toUp20 and dir20 == -1 and lastHigh20 >= 0
+    [ll, llIdx] = findLowest(bar_index - lastHigh20, 2000)
+    array.push(typ20, -1)
+    array.push(prc20, ll)
+    array.push(tim20, time[bar_index - llIdx])
+    array.push(idx20, llIdx)
+    lastLow20 := llIdx
+
+if toDown20 and dir20 == 0
+    [hh, hhIdx] = findHighest(bar_index, 2000)
+    array.push(typ20, 1)
+    array.push(prc20, hh)
+    array.push(tim20, time[bar_index - hhIdx])
+    array.push(idx20, hhIdx)
+    lastHigh20 := hhIdx
+
+if toUp20 and dir20 == 0
+    [ll, llIdx] = findLowest(bar_index, 2000)
+    array.push(typ20, -1)
+    array.push(prc20, ll)
+    array.push(tim20, time[bar_index - llIdx])
+    array.push(idx20, llIdx)
+    lastLow20 := llIdx
+
+if toUp20 or toDown20
+    doMerge(typ20, prc20, tim20, idx20)
+
+if toUp20
+    dir20 := 1
+if toDown20
+    dir20 := -1
+
+while array.size(typ20) > maxPivots
+    mergeRemove(typ20, prc20, tim20, 0)
+    array.remove(idx20, 0)
+
+// ══════════════════════════════════════════════
+//  T3=15
+// ══════════════════════════════════════════════
+o15 = t3Smooth(haOpen, 15)
+c15 = t3Smooth(haClose, 15)
+
+var int   dir15      = 0
+var int[] typ15      = array.new<int>()
+var float[] prc15    = array.new<float>()
+var int[] tim15      = array.new<int>()
+var int[] idx15      = array.new<int>()
+var int   lastLow15  = -1
+var int   lastHigh15 = -1
+
+bull15   = c15 > o15
+bear15   = c15 < o15
+toUp15   = (dir15 == -1 and bull15) or (dir15 == 0 and bull15)
+toDown15 = (dir15 == 1 and bear15) or (dir15 == 0 and bear15)
+
+if toDown15 and dir15 == 1 and lastLow15 >= 0
+    [hh, hhIdx] = findHighest(bar_index - lastLow15, 1500)
+    array.push(typ15, 1)
+    array.push(prc15, hh)
+    array.push(tim15, time[bar_index - hhIdx])
+    array.push(idx15, hhIdx)
+    lastHigh15 := hhIdx
+
+if toUp15 and dir15 == -1 and lastHigh15 >= 0
+    [ll, llIdx] = findLowest(bar_index - lastHigh15, 1500)
+    array.push(typ15, -1)
+    array.push(prc15, ll)
+    array.push(tim15, time[bar_index - llIdx])
+    array.push(idx15, llIdx)
+    lastLow15 := llIdx
+
+if toDown15 and dir15 == 0
+    [hh, hhIdx] = findHighest(bar_index, 1500)
+    array.push(typ15, 1)
+    array.push(prc15, hh)
+    array.push(tim15, time[bar_index - hhIdx])
+    array.push(idx15, hhIdx)
+    lastHigh15 := hhIdx
+
+if toUp15 and dir15 == 0
+    [ll, llIdx] = findLowest(bar_index, 1500)
+    array.push(typ15, -1)
+    array.push(prc15, ll)
+    array.push(tim15, time[bar_index - llIdx])
+    array.push(idx15, llIdx)
+    lastLow15 := llIdx
+
+if toUp15 or toDown15
+    doMerge(typ15, prc15, tim15, idx15)
+
+if toUp15
+    dir15 := 1
+if toDown15
+    dir15 := -1
+
+while array.size(typ15) > maxPivots
+    mergeRemove(typ15, prc15, tim15, 0)
+    array.remove(idx15, 0)
+
+// ══════════════════════════════════════════════
+//  T3=10
+// ══════════════════════════════════════════════
+o10 = t3Smooth(haOpen, 10)
+c10 = t3Smooth(haClose, 10)
+
+var int   dir10      = 0
+var int[] typ10      = array.new<int>()
+var float[] prc10    = array.new<float>()
+var int[] tim10      = array.new<int>()
+var int[] idx10      = array.new<int>()
+var int   lastLow10  = -1
+var int   lastHigh10 = -1
+
+bull10   = c10 > o10
+bear10   = c10 < o10
+toUp10   = (dir10 == -1 and bull10) or (dir10 == 0 and bull10)
+toDown10 = (dir10 == 1 and bear10) or (dir10 == 0 and bear10)
+
+if toDown10 and dir10 == 1 and lastLow10 >= 0
+    [hh, hhIdx] = findHighest(bar_index - lastLow10, 1000)
+    array.push(typ10, 1)
+    array.push(prc10, hh)
+    array.push(tim10, time[bar_index - hhIdx])
+    array.push(idx10, hhIdx)
+    lastHigh10 := hhIdx
+
+if toUp10 and dir10 == -1 and lastHigh10 >= 0
+    [ll, llIdx] = findLowest(bar_index - lastHigh10, 1000)
+    array.push(typ10, -1)
+    array.push(prc10, ll)
+    array.push(tim10, time[bar_index - llIdx])
+    array.push(idx10, llIdx)
+    lastLow10 := llIdx
+
+if toDown10 and dir10 == 0
+    [hh, hhIdx] = findHighest(bar_index, 1000)
+    array.push(typ10, 1)
+    array.push(prc10, hh)
+    array.push(tim10, time[bar_index - hhIdx])
+    array.push(idx10, hhIdx)
+    lastHigh10 := hhIdx
+
+if toUp10 and dir10 == 0
+    [ll, llIdx] = findLowest(bar_index, 1000)
+    array.push(typ10, -1)
+    array.push(prc10, ll)
+    array.push(tim10, time[bar_index - llIdx])
+    array.push(idx10, llIdx)
+    lastLow10 := llIdx
+
+if toUp10 or toDown10
+    doMerge(typ10, prc10, tim10, idx10)
+
+if toUp10
+    dir10 := 1
+if toDown10
+    dir10 := -1
+
+while array.size(typ10) > maxPivots
+    mergeRemove(typ10, prc10, tim10, 0)
+    array.remove(idx10, 0)
+
+// ══════════════════════════════════════════════
+//  多框架合并
+// ══════════════════════════════════════════════
+var int[]   mrgType  = array.new<int>()
+var float[] mrgPrice = array.new<float>()
+var int[]   mrgTime  = array.new<int>()
+
+findInIdx(arr, target) =>
+    result = -1
+    n = array.size(arr)
+    for i = 0 to n - 1
+        if array.get(arr, i) == target
+            result := i
+            break
+    result
+
+if barstate.islast
+    array.clear(mrgType)
+    array.clear(mrgPrice)
+    array.clear(mrgTime)
+
+    n20 = array.size(typ20)
+    if n20 >= 1
+        // 先加第一个拐点
+        array.push(mrgType, array.get(typ20, 0))
+        array.push(mrgPrice, array.get(prc20, 0))
+        array.push(mrgTime, array.get(tim20, 0))
+
+    if n20 >= 2
+        for i = 0 to n20 - 2
+            startIdx = array.get(idx20, i)
+            endIdx   = array.get(idx20, i + 1)
+
+            p15_s = findInIdx(idx15, startIdx)
+            p15_e = findInIdx(idx15, endIdx)
+            p10_s = findInIdx(idx10, startIdx)
+            p10_e = findInIdx(idx10, endIdx)
+
+            useAlt = false
+            if p15_s >= 0 and p15_e >= 0 and p10_s >= 0 and p10_e >= 0
+                cnt15 = p15_e - p15_s + 1
+                cnt10 = p10_e - p10_s + 1
+                if cnt15 == cnt10
+                    match = true
+                    for k = 0 to cnt15 - 1
+                        if array.get(idx15, p15_s + k) != array.get(idx10, p10_s + k)
+                            match := false
+                            break
+                    if match
+                        useAlt := true
+                        // 加15的拐点 — 跳过第一个(已作为上一段的end或第一个加入)
+                        for k = p15_s + 1 to p15_e
+                            array.push(mrgType, array.get(typ15, k))
+                            array.push(mrgPrice, array.get(prc15, k))
+                            array.push(mrgTime, array.get(tim15, k))
+
+            if not useAlt
+                // 只加端点(20的下一拐点)
+                array.push(mrgType, array.get(typ20, i + 1))
+                array.push(mrgPrice, array.get(prc20, i + 1))
+                array.push(mrgTime, array.get(tim20, i + 1))
+
+// ══════════════════════════════════════════════
+//  绘制折线
+// ══════════════════════════════════════════════
 var line[] zigLines = array.new<line>()
 
 drawZigLines() =>
@@ -160,33 +335,34 @@ drawZigLines() =>
         line.delete(l)
     array.clear(zigLines)
 
-    n = array.size(pivType)
+    n = array.size(mrgType)
     if n >= 2
         for i = 0 to n - 2
-            x1 = array.get(pivTime, i)
-            y1 = array.get(pivPrice, i)
-            x2 = array.get(pivTime, i + 1)
-            y2 = array.get(pivPrice, i + 1)
+            x1 = array.get(mrgTime, i)
+            y1 = array.get(mrgPrice, i)
+            x2 = array.get(mrgTime, i + 1)
+            y2 = array.get(mrgPrice, i + 1)
             l = line.new(x1, y1, x2, y2, xloc=xloc.bar_time, color=color.blue, width=2)
             array.push(zigLines, l)
 
-    // 当前活跃段虚线: 从最后拐点到当前bar极值
-    if n >= 1 and dir != 0 and barstate.islast
-        x1      = array.get(pivTime, n - 1)
-        y1      = array.get(pivPrice, n - 1)
-        lastIdx = array.get(pivIdx, n - 1)
-        curExtVal  = float(na)
-        curExtTime = int(na)
-        if dir == 1
-            [hVal, hIdx] = findHighest(lastIdx, bar_index)
-            curExtVal  := hVal
-            curExtTime := time[bar_index - hIdx]
+    // 活跃段虚线
+    if n >= 1 and dir20 != 0 and barstate.islast
+        x1       = array.get(mrgTime, n - 1)
+        y1       = array.get(mrgPrice, n - 1)
+        lastI20  = array.size(idx20) > 0 ? array.get(idx20, array.size(idx20) - 1) : 0
+        back     = bar_index - lastI20
+        curVal   = float(na)
+        curTime  = int(na)
+        if dir20 == 1
+            [vv, vi] = findHighest(back, 2000)
+            curVal   := vv
+            curTime  := time[bar_index - vi]
         else
-            [lVal, lIdx] = findLowest(lastIdx, bar_index)
-            curExtVal  := lVal
-            curExtTime := time[bar_index - lIdx]
-        if not na(curExtVal)
-            l = line.new(x1, y1, curExtTime, curExtVal, xloc=xloc.bar_time, color=color.blue, width=1, style=line.style_dashed)
+            [vv, vi] = findLowest(back, 2000)
+            curVal   := vv
+            curTime  := time[bar_index - vi]
+        if not na(curVal)
+            l = line.new(x1, y1, curTime, curVal, xloc=xloc.bar_time, color=color.blue, width=1, style=line.style_dashed)
             array.push(zigLines, l)
 
 if showLines
@@ -197,27 +373,34 @@ else
             line.delete(l)
         array.clear(zigLines)
 
-// ═══ 拐点标记 ═══
+// ══════════════════════════════════════════════
+//  拐点标记
+// ══════════════════════════════════════════════
 var label[] zigLabels = array.new<label>()
-nPiv = array.size(pivType)
-if showLabels and nPiv > 0
+nMerged = array.size(mrgType)
+if showLabels and nMerged > 0
     for lb in zigLabels
         label.delete(lb)
     array.clear(zigLabels)
-    for i = 0 to nPiv - 1
-        t   = array.get(pivTime, i)
-        p   = array.get(pivPrice, i)
-        tp  = array.get(pivType, i)
+    for i = 0 to nMerged - 1
+        t   = array.get(mrgTime, i)
+        p   = array.get(mrgPrice, i)
+        tp  = array.get(mrgType, i)
         txt = tp == 1 ? "H" : "L"
         clr = tp == 1 ? color.red : color.green
         sty = tp == 1 ? label.style_label_down : label.style_label_up
         label.new(t, p, txt, xloc=xloc.bar_time, color=clr, textcolor=color.white, style=sty, size=size.small)
 
-// ═══ 调试 ═══
-var table dbg = table.new(position.top_right, 2, 3, border_width=1)
+// ══════════════════════════════════════════════
+//  调试
+// ══════════════════════════════════════════════
+var table dbg = table.new(position.top_right, 3, 4, border_width=1)
 if barstate.islast
-    n = array.size(pivType)
-    table.cell(dbg, 0, 0, "HA Zigzag v7", text_color=color.white)
-    table.cell(dbg, 0, 1, "拐点: " + str.tostring(n), text_color=color.white)
-    table.cell(dbg, 1, 1, "T3Len: " + str.tostring(t3Len), text_color=color.white)
-    table.cell(dbg, 0, 2, "方向: " + (dir == 1 ? "涨" : dir == -1 ? "跌" : "—"), text_color=color.white)
+    n20 = array.size(typ20)
+    n15 = array.size(typ15)
+    n10 = array.size(typ10)
+    nM  = array.size(mrgType)
+    table.cell(dbg, 0, 0, "HA Zigzag v7 MTF", text_color=color.white)
+    table.cell(dbg, 0, 1, "20:" + str.tostring(n20) + " 15:" + str.tostring(n15) + " 10:" + str.tostring(n10), text_color=color.white)
+    table.cell(dbg, 0, 2, "合并: " + str.tostring(nM), text_color=color.white)
+    table.cell(dbg, 0, 3, "dir20:" + (dir20 == 1 ? "涨" : dir20 == -1 ? "跌" : "—"), text_color=color.white)
