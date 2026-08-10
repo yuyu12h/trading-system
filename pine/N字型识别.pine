@@ -1,0 +1,449 @@
+//@version=5
+indicator('N 字型识别 [LH]', 'N Pattern', true, max_lines_count=500, max_labels_count=500, max_bars_back=2000)
+
+// ===================================================================
+// 参数
+// ===================================================================
+pvtLeft   = input.int(10, 'Pivot 左', minval=2, maxval=500, step=1, group='枢轴点')
+pvtRight  = input.int(10, 'Pivot 右', minval=2, maxval=500, step=1, group='枢轴点')
+zzColor   = input.color(color.new(color.gray, 65), '枢轴折线色', group='显示')
+bullColor = input.color(color.new(#00E676, 0), '上涨 N 色', group='显示')
+bearColor = input.color(color.new(#FF1744, 0), '下跌 N 色', group='显示')
+dashColor = input.color(color.new(#FFD600, 40), '虚线色', group='显示')
+lineW     = input.int(2, 'N 线宽', minval=1, maxval=4, group='显示')
+showLbl   = input.bool(true, '显示标签', group='显示')
+
+// ===================================================================
+// 清洗枢轴点（严格交替）
+// ===================================================================
+ph = ta.pivothigh(high, pvtLeft, pvtRight)
+pl = ta.pivotlow(low, pvtLeft, pvtRight)
+
+var int[]   pvBar   = array.new<int>()
+var float[] pvPrice = array.new<float>()
+var string[] pvType  = array.new<string>()
+var int[]   pvTime  = array.new<int>()
+
+maxPv = 300
+
+if not na(ph)
+    nb = bar_index - pvtRight
+    np = ph
+    nt = time[pvtRight]
+    sz = array.size(pvBar)
+    if sz > 0
+        if array.get(pvType, sz - 1) == 'High'
+            if np > array.get(pvPrice, sz - 1)
+                array.set(pvBar, sz - 1, nb)
+                array.set(pvPrice, sz - 1, np)
+                array.set(pvTime, sz - 1, nt)
+        else
+            array.push(pvBar, nb)
+            array.push(pvPrice, np)
+            array.push(pvType, 'High')
+            array.push(pvTime, nt)
+    else
+        array.push(pvBar, nb)
+        array.push(pvPrice, np)
+        array.push(pvType, 'High')
+        array.push(pvTime, nt)
+
+if not na(pl)
+    nb = bar_index - pvtRight
+    np = pl
+    nt = time[pvtRight]
+    sz = array.size(pvBar)
+    if sz > 0
+        if array.get(pvType, sz - 1) == 'Low'
+            if np < array.get(pvPrice, sz - 1)
+                array.set(pvBar, sz - 1, nb)
+                array.set(pvPrice, sz - 1, np)
+                array.set(pvTime, sz - 1, nt)
+        else
+            array.push(pvBar, nb)
+            array.push(pvPrice, np)
+            array.push(pvType, 'Low')
+            array.push(pvTime, nt)
+    else
+        array.push(pvBar, nb)
+        array.push(pvPrice, np)
+        array.push(pvType, 'Low')
+        array.push(pvTime, nt)
+
+while array.size(pvBar) > maxPv
+    array.shift(pvBar)
+    array.shift(pvPrice)
+    array.shift(pvType)
+    array.shift(pvTime)
+
+pvCount = array.size(pvBar)
+
+// ===================================================================
+// 5 连窗口扫描 — 找出 N 字
+// ===================================================================
+var int[] nBullL1T = array.new<int>()
+var float[] nBullL1P = array.new<float>()
+var int[] nBullH1T = array.new<int>()
+var float[] nBullH1P = array.new<float>()
+var int[] nBullL2T = array.new<int>()
+var float[] nBullL2P = array.new<float>()
+var int[] nBullH2T = array.new<int>()
+var float[] nBullH2P = array.new<float>()
+
+var int[] nBearH1T = array.new<int>()
+var float[] nBearH1P = array.new<float>()
+var int[] nBearL1T = array.new<int>()
+var float[] nBearL1P = array.new<float>()
+var int[] nBearH2T = array.new<int>()
+var float[] nBearH2P = array.new<float>()
+var int[] nBearL2T = array.new<int>()
+var float[] nBearL2P = array.new<float>()
+
+var int[] doneB = array.new<int>()
+var int[] doneR = array.new<int>()
+
+var int lastScan = 0
+
+if pvCount >= 5
+    for i = lastScan to pvCount - 5
+        t0 = array.get(pvType, i)
+        t1 = array.get(pvType, i + 1)
+        t2 = array.get(pvType, i + 2)
+        t3 = array.get(pvType, i + 3)
+        t4 = array.get(pvType, i + 4)
+
+        // ---- 上涨 N ----
+        if t0 == 'Low' and t1 == 'High' and t2 == 'Low' and t3 == 'High' and t4 == 'Low'
+            l1 = array.get(pvPrice, i)
+            h1 = array.get(pvPrice, i + 1)
+            l2 = array.get(pvPrice, i + 2)
+            l2Lk = array.get(pvBar, i + 3)
+            h2Lk = array.get(pvBar, i + 4)
+
+            if l2 > l1
+                rng = h2Lk - l2Lk + 1
+                off = bar_index - h2Lk
+                if off + rng <= 2000 and rng > 0
+                    brk = -1
+                    h2b = l2Lk
+                    h2v = 0.0
+                    for b = l2Lk to h2Lk
+                        hIdx = bar_index - b
+                        if hIdx <= 2000
+                            hV = high[hIdx]
+                            if brk == -1
+                                if hV > h1
+                                    brk := b
+                                    h2v := hV
+                                    h2b := b
+                            else
+                                if hV > h2v
+                                    h2v := hV
+                                    h2b := b
+                    if brk != -1
+                        l1Bar = array.get(pvBar, i)
+                        dup = false
+                        dbSize = array.size(doneB)
+                        if dbSize > 0
+                            for di = 0 to dbSize - 1
+                                if array.get(doneB, di) == l1Bar
+                                    dup := true
+                        if not dup
+                            array.push(doneB, l1Bar)
+                            array.push(nBullL1T, array.get(pvTime, i))
+                            array.push(nBullL1P, l1)
+                            array.push(nBullH1T, array.get(pvTime, i + 1))
+                            array.push(nBullH1P, h1)
+                            array.push(nBullL2T, array.get(pvTime, i + 2))
+                            array.push(nBullL2P, l2)
+                            array.push(nBullH2T, time[bar_index - h2b])
+                            array.push(nBullH2P, h2v)
+
+        // ---- 下跌 N ----
+        if t0 == 'High' and t1 == 'Low' and t2 == 'High' and t3 == 'Low' and t4 == 'High'
+            h1 = array.get(pvPrice, i)
+            l1 = array.get(pvPrice, i + 1)
+            h2 = array.get(pvPrice, i + 2)
+            h2Lk = array.get(pvBar, i + 3)
+            l2Lk = array.get(pvBar, i + 4)
+
+            if h2 < h1
+                rng = l2Lk - h2Lk + 1
+                off = bar_index - l2Lk
+                if off + rng <= 2000 and rng > 0
+                    brk = -1
+                    l2b = h2Lk
+                    l2v = 0.0
+                    for b = h2Lk to l2Lk
+                        lIdx = bar_index - b
+                        if lIdx <= 2000
+                            lV = low[lIdx]
+                            if brk == -1
+                                if lV < l1
+                                    brk := b
+                                    l2v := lV
+                                    l2b := b
+                            else
+                                if lV < l2v
+                                    l2v := lV
+                                    l2b := b
+                    if brk != -1
+                        h1Bar = array.get(pvBar, i)
+                        dup = false
+                        drSize = array.size(doneR)
+                        if drSize > 0
+                            for di = 0 to drSize - 1
+                                if array.get(doneR, di) == h1Bar
+                                    dup := true
+                        if not dup
+                            array.push(doneR, h1Bar)
+                            array.push(nBearH1T, array.get(pvTime, i))
+                            array.push(nBearH1P, h1)
+                            array.push(nBearL1T, array.get(pvTime, i + 1))
+                            array.push(nBearL1P, l1)
+                            array.push(nBearH2T, array.get(pvTime, i + 2))
+                            array.push(nBearH2P, h2)
+                            array.push(nBearL2T, time[bar_index - l2b])
+                            array.push(nBearL2P, l2v)
+
+    lastScan := math.max(0, pvCount - 5)
+
+// ===================================================================
+// 限制存储数量
+// ===================================================================
+maxN = 60
+
+while array.size(nBullL1T) > maxN
+    array.shift(nBullL1T)
+    array.shift(nBullL1P)
+    array.shift(nBullH1T)
+    array.shift(nBullH1P)
+    array.shift(nBullL2T)
+    array.shift(nBullL2P)
+    array.shift(nBullH2T)
+    array.shift(nBullH2P)
+    array.shift(doneB)
+
+while array.size(nBearH1T) > maxN
+    array.shift(nBearH1T)
+    array.shift(nBearH1P)
+    array.shift(nBearL1T)
+    array.shift(nBearL1P)
+    array.shift(nBearH2T)
+    array.shift(nBearH2P)
+    array.shift(nBearL2T)
+    array.shift(nBearL2P)
+    array.shift(doneR)
+
+// ===================================================================
+// 绘制
+// ===================================================================
+// --- 灰底：全部枢轴折线 ---
+var line[] zzLines = array.new<line>()
+var int prevPv = -1
+
+if pvCount != prevPv
+    zzSize = array.size(zzLines)
+    if zzSize > 0
+        for li = 0 to zzSize - 1
+            line.delete(array.get(zzLines, li))
+    array.clear(zzLines)
+    if pvCount > 1
+        for si = 1 to pvCount - 1
+            t1 = array.get(pvTime, si - 1)
+            p1 = array.get(pvPrice, si - 1)
+            t2 = array.get(pvTime, si)
+            p2 = array.get(pvPrice, si)
+            array.push(zzLines, line.new(t1, p1, t2, p2, xloc=xloc.bar_time, color=zzColor, width=1))
+    prevPv := pvCount
+
+// --- N 字彩色覆盖线 ---
+var line[]  nLines = array.new<line>()
+var label[] nLbl   = array.new<label>()
+var int prevBN = -1
+var int prevRN = -1
+
+bnCount = array.size(nBullL1T)
+rnCount = array.size(nBearH1T)
+
+if bnCount != prevBN or rnCount != prevRN
+    nlSize = array.size(nLines)
+    if nlSize > 0
+        for li = 0 to nlSize - 1
+            line.delete(array.get(nLines, li))
+    array.clear(nLines)
+    lbSize = array.size(nLbl)
+    if lbSize > 0
+        for li = 0 to lbSize - 1
+            label.delete(array.get(nLbl, li))
+    array.clear(nLbl)
+
+    if bnCount > 0
+        for bi = 0 to bnCount - 1
+            l1t = array.get(nBullL1T, bi)
+            l1p = array.get(nBullL1P, bi)
+            h1t = array.get(nBullH1T, bi)
+            h1p = array.get(nBullH1P, bi)
+            l2t = array.get(nBullL2T, bi)
+            l2p = array.get(nBullL2P, bi)
+            h2t = array.get(nBullH2T, bi)
+            h2p = array.get(nBullH2P, bi)
+            array.push(nLines, line.new(l1t, l1p, h1t, h1p, xloc=xloc.bar_time, color=bullColor, width=lineW))
+            array.push(nLines, line.new(h1t, h1p, l2t, l2p, xloc=xloc.bar_time, color=bullColor, width=lineW))
+            array.push(nLines, line.new(l2t, l2p, h2t, h2p, xloc=xloc.bar_time, color=bullColor, width=lineW))
+            if showLbl
+                array.push(nLbl, label.new(l1t, l1p, 'L1', xloc=xloc.bar_time, style=label.style_label_up, size=size.tiny, color=bullColor, textcolor=color.white))
+                array.push(nLbl, label.new(h1t, h1p, 'H1', xloc=xloc.bar_time, style=label.style_label_down, size=size.tiny, color=bullColor, textcolor=color.white))
+                array.push(nLbl, label.new(l2t, l2p, 'L2', xloc=xloc.bar_time, style=label.style_label_up, size=size.tiny, color=bullColor, textcolor=color.white))
+                array.push(nLbl, label.new(h2t, h2p, 'H2', xloc=xloc.bar_time, style=label.style_label_down, size=size.tiny, color=bullColor, textcolor=color.white))
+
+    if rnCount > 0
+        for ri = 0 to rnCount - 1
+            h1t = array.get(nBearH1T, ri)
+            h1p = array.get(nBearH1P, ri)
+            l1t = array.get(nBearL1T, ri)
+            l1p = array.get(nBearL1P, ri)
+            h2t = array.get(nBearH2T, ri)
+            h2p = array.get(nBearH2P, ri)
+            l2t = array.get(nBearL2T, ri)
+            l2p = array.get(nBearL2P, ri)
+            array.push(nLines, line.new(h1t, h1p, l1t, l1p, xloc=xloc.bar_time, color=bearColor, width=lineW))
+            array.push(nLines, line.new(l1t, l1p, h2t, h2p, xloc=xloc.bar_time, color=bearColor, width=lineW))
+            array.push(nLines, line.new(h2t, h2p, l2t, l2p, xloc=xloc.bar_time, color=bearColor, width=lineW))
+            if showLbl
+                array.push(nLbl, label.new(h1t, h1p, 'H1', xloc=xloc.bar_time, style=label.style_label_down, size=size.tiny, color=bearColor, textcolor=color.white))
+                array.push(nLbl, label.new(l1t, l1p, 'L1', xloc=xloc.bar_time, style=label.style_label_up, size=size.tiny, color=bearColor, textcolor=color.white))
+                array.push(nLbl, label.new(h2t, h2p, 'H2', xloc=xloc.bar_time, style=label.style_label_down, size=size.tiny, color=bearColor, textcolor=color.white))
+                array.push(nLbl, label.new(l2t, l2p, 'L2', xloc=xloc.bar_time, style=label.style_label_up, size=size.tiny, color=bearColor, textcolor=color.white))
+
+    prevBN := bnCount
+    prevRN := rnCount
+
+// ===================================================================
+// 半成品虚线
+// ===================================================================
+semiBull = false
+var float sbL1 = float(na)
+var float sbH1 = float(na)
+var float sbL2 = float(na)
+var float sbH2 = float(na)
+var int   sbL1T = int(na)
+var int   sbH1T = int(na)
+var int   sbL2T = int(na)
+var int   sbL2L = int(na)
+
+semiBear = false
+var float srH1 = float(na)
+var float srL1 = float(na)
+var float srH2 = float(na)
+var float srL2 = float(na)
+var int   srH1T = int(na)
+var int   srL1T = int(na)
+var int   srH2T = int(na)
+var int   srH2L = int(na)
+
+if pvCount >= 4
+    lastT = array.get(pvType, pvCount - 1)
+    if lastT == 'High'
+        i = pvCount - 4
+        if array.get(pvType, i) == 'Low' and array.get(pvType, i + 1) == 'High' and array.get(pvType, i + 2) == 'Low'
+            sbL1 := array.get(pvPrice, i)
+            sbH1 := array.get(pvPrice, i + 1)
+            sbL2 := array.get(pvPrice, i + 2)
+            sbL1T := array.get(pvTime, i)
+            sbH1T := array.get(pvTime, i + 1)
+            sbL2T := array.get(pvTime, i + 2)
+            sbL2L := array.get(pvBar, i + 3)
+            if sbL2 > sbL1
+                mx = ta.highest(high, bar_index - sbL2L + 1)
+                if mx > sbH1
+                    semiBull := true
+                    sbH2 := mx
+
+    if lastT == 'Low'
+        i = pvCount - 4
+        if array.get(pvType, i) == 'High' and array.get(pvType, i + 1) == 'Low' and array.get(pvType, i + 2) == 'High'
+            srH1 := array.get(pvPrice, i)
+            srL1 := array.get(pvPrice, i + 1)
+            srH2 := array.get(pvPrice, i + 2)
+            srH1T := array.get(pvTime, i)
+            srL1T := array.get(pvTime, i + 1)
+            srH2T := array.get(pvTime, i + 2)
+            srH2L := array.get(pvBar, i + 3)
+            if srH2 < srH1
+                mn = ta.lowest(low, bar_index - srH2L + 1)
+                if mn < srL1
+                    semiBear := true
+                    srL2 := mn
+
+if semiBull
+    mx = ta.highest(high, bar_index - sbL2L + 1)
+    if mx > sbH2
+        sbH2 := mx
+
+if semiBear
+    mn = ta.lowest(low, bar_index - srH2L + 1)
+    if mn < srL2
+        srL2 := mn
+
+var line dB1 = na
+var line dB2 = na
+var line dB3 = na
+
+if semiBull
+    if na(dB1)
+        dB1 := line.new(sbL1T, sbL1, sbH1T, sbH1, xloc=xloc.bar_time, color=dashColor, style=line.style_dashed, width=1)
+    else
+        line.set_xy1(dB1, sbL1T, sbL1)
+        line.set_xy2(dB1, sbH1T, sbH1)
+    if na(dB2)
+        dB2 := line.new(sbH1T, sbH1, sbL2T, sbL2, xloc=xloc.bar_time, color=dashColor, style=line.style_dashed, width=1)
+    else
+        line.set_xy1(dB2, sbH1T, sbH1)
+        line.set_xy2(dB2, sbL2T, sbL2)
+    if na(dB3)
+        dB3 := line.new(sbL2T, sbL2, time[1], sbH2, xloc=xloc.bar_time, color=dashColor, style=line.style_dashed, width=1)
+    else
+        line.set_xy1(dB3, sbL2T, sbL2)
+        line.set_xy2(dB3, time[1], sbH2)
+else
+    if not na(dB1)
+        line.delete(dB1)
+        dB1 := na
+    if not na(dB2)
+        line.delete(dB2)
+        dB2 := na
+    if not na(dB3)
+        line.delete(dB3)
+        dB3 := na
+
+var line dR1 = na
+var line dR2 = na
+var line dR3 = na
+
+if semiBear
+    if na(dR1)
+        dR1 := line.new(srH1T, srH1, srL1T, srL1, xloc=xloc.bar_time, color=dashColor, style=line.style_dashed, width=1)
+    else
+        line.set_xy1(dR1, srH1T, srH1)
+        line.set_xy2(dR1, srL1T, srL1)
+    if na(dR2)
+        dR2 := line.new(srL1T, srL1, srH2T, srH2, xloc=xloc.bar_time, color=dashColor, style=line.style_dashed, width=1)
+    else
+        line.set_xy1(dR2, srL1T, srL1)
+        line.set_xy2(dR2, srH2T, srH2)
+    if na(dR3)
+        dR3 := line.new(srH2T, srH2, time[1], srL2, xloc=xloc.bar_time, color=dashColor, style=line.style_dashed, width=1)
+    else
+        line.set_xy1(dR3, srH2T, srH2)
+        line.set_xy2(dR3, time[1], srL2)
+else
+    if not na(dR1)
+        line.delete(dR1)
+        dR1 := na
+    if not na(dR2)
+        line.delete(dR2)
+        dR2 := na
+    if not na(dR3)
+        line.delete(dR3)
+        dR3 := na

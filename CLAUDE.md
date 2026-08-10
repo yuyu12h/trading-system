@@ -508,18 +508,24 @@ The script max_lines_count value (1000) is greater than the maximum possible val
    - 首次保存会弹出命名弹窗，需要先处理弹窗再点添加按钮
 
 5. **注入流程时序**：
+   - **每次注入前必须先点"New"按钮建空白脚本**，否则旧代码残留导致 `setValue` 未真正覆盖
+   - 点 New 后等待 1500ms 确保编辑器清空
    - `setValue()` 后等待 300ms 再 `getValue()` 验证
+   - **验证方式**：检查总行数（±5 容差）+ 中间特征行，不只看前 30 字符（新旧代码第一行相同会误判为 OK）
    - Ctrl+S 后等待 800ms 检查保存弹窗
    - 弹窗确认后等待 500ms 再点 Add to chart
    - 点 Add to chart 后等待 2500ms 再检查编译结果
    - 编译检查前等待 1500ms 确保编译器处理完毕
 
-6. **注入脚本**：优先使用 skill 中的 `scripts/inject_pine.js`，它会自动处理五步流程。不要写临时 CDP 脚本再删除，直接用：`node C:/Users/Administrator/.claude/skills/pine-indicator-loader/scripts/inject_pine.js <pine_file>`。核心流程：
+6. **注入脚本**：优先使用 skill 中的 `scripts/inject_pine.js`，它会自动处理六步流程（含 New 空白脚本）。不要写临时 CDP 脚本再删除，直接用：`node C:/Users/Administrator/.claude/skills/pine-indicator-loader/scripts/inject_pine.js <pine_file>`。核心流程：
    ```
    Target.getTargets → Target.attachToTarget →
-   FIND_MONACO + setValue → getValue 验证 →
+   FIND_MONACO → 点 New 建空白脚本 →
+   setValue → getValue 验证（行数+特征行）→
    Ctrl+S → 检查弹窗 → Add to chart 按钮 →
    getModelMarkers 检查编译
    ```
 
 7. **FIND_MONACO 返回 E0 且编辑器存在但 React fiber 找不到**：TradingView 运行久了 Monaco 的 React fiber 引用可能丢失。**重启 TradingView** 即可恢复（`taskkill //F //IM TradingView.exe` 后重新启动）。点击 Pine 按钮或 `activateScriptEditorTab()` 都无法修复此状态。
+
+8. **`for i = 0 to -1` 空数组越界**：Pine Script 中 `for i = 0 to N` 当 N < 0 时仍可能执行一次。**所有循环前必须加 `if len > 0` 保护**，写成 `if len > 0; for i = 0 to len - 1`。同时 `for` 循环体必须比 `for` 关键字多一级缩进，否则 Pine 不认为其在循环内。

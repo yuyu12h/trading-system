@@ -1,0 +1,155 @@
+//@version=5
+indicator('清洗枢轴点 [LH]', 'Clean Piv', true, max_lines_count=500, max_labels_count=500, max_bars_back=501)
+
+// ===================================================================
+// 参数
+// ===================================================================
+pvtLeft  = input.int(10, 'Pivot 左',  minval=2, maxval=500, step=1)
+pvtRight = input.int(10, 'Pivot 右', minval=2, maxval=500, step=1)
+hiColor  = input.color(color.new(#FF1744, 0), '高点色', group='显示')
+loColor  = input.color(color.new(#00E676, 0), '低点色', group='显示')
+lineW    = input.int(2, '线宽', minval=1, maxval=4, group='显示')
+showLbl  = input.bool(true, '显示标签', group='显示')
+
+// ===================================================================
+// 枢轴点检测
+// ===================================================================
+ph = ta.pivothigh(high, pvtLeft, pvtRight)
+pl = ta.pivotlow(low, pvtLeft, pvtRight)
+
+// 清洗后的枢轴点（严格交替）
+var int[]   cPvBar  = array.new<int>()
+var float[] cPvPrice = array.new<float>()
+var string[] cPvType = array.new<string>()
+var int[]   cPvTime = array.new<int>()
+
+maxPv = 300
+
+// 处理 pivot high
+if not na(ph)
+    newBar = bar_index - pvtRight
+    newPrice = ph
+    newTime = time[pvtRight]
+    sz = array.size(cPvBar)
+    if sz > 0
+        if array.get(cPvType, sz - 1) == 'High'
+            // 连续 High → 保留更高的
+            if newPrice > array.get(cPvPrice, sz - 1)
+                array.set(cPvBar, sz - 1, newBar)
+                array.set(cPvPrice, sz - 1, newPrice)
+                array.set(cPvTime, sz - 1, newTime)
+        else
+            // 前一个是 Low → 追加
+            array.push(cPvBar, newBar)
+            array.push(cPvPrice, newPrice)
+            array.push(cPvType, 'High')
+            array.push(cPvTime, newTime)
+    else
+        // 第一个枢轴
+        array.push(cPvBar, newBar)
+        array.push(cPvPrice, newPrice)
+        array.push(cPvType, 'High')
+        array.push(cPvTime, newTime)
+
+// 处理 pivot low
+if not na(pl)
+    newBar = bar_index - pvtRight
+    newPrice = pl
+    newTime = time[pvtRight]
+    sz = array.size(cPvBar)
+    if sz > 0
+        if array.get(cPvType, sz - 1) == 'Low'
+            // 连续 Low → 保留更低的
+            if newPrice < array.get(cPvPrice, sz - 1)
+                array.set(cPvBar, sz - 1, newBar)
+                array.set(cPvPrice, sz - 1, newPrice)
+                array.set(cPvTime, sz - 1, newTime)
+        else
+            // 前一个是 High → 追加
+            array.push(cPvBar, newBar)
+            array.push(cPvPrice, newPrice)
+            array.push(cPvType, 'Low')
+            array.push(cPvTime, newTime)
+    else
+        // 第一个枢轴
+        array.push(cPvBar, newBar)
+        array.push(cPvPrice, newPrice)
+        array.push(cPvType, 'Low')
+        array.push(cPvTime, newTime)
+
+// 限制数量
+while array.size(cPvBar) > maxPv
+    array.shift(cPvBar)
+    array.shift(cPvPrice)
+    array.shift(cPvType)
+    array.shift(cPvTime)
+
+// ===================================================================
+// 绘制
+// ===================================================================
+var line[]  pvLines  = array.new<line>()
+var label[] pvLabels = array.new<label>()
+
+pvCount = array.size(cPvBar)
+
+// 检测是否需要重建
+var int prevPvCount = -1
+var int prevLastBar = -1
+pvLastBar = pvCount > 0 ? array.get(cPvBar, pvCount - 1) : -1
+needRebuild = pvCount != prevPvCount or pvLastBar != prevLastBar
+
+if needRebuild
+    // 删除旧线
+    lnSize = array.size(pvLines)
+    if lnSize > 0
+        for i = 0 to lnSize - 1
+            line.delete(array.get(pvLines, i))
+        array.clear(pvLines)
+    // 删除旧标签
+    lbSize = array.size(pvLabels)
+    if lbSize > 0
+        for i = 0 to lbSize - 1
+            label.delete(array.get(pvLabels, i))
+        array.clear(pvLabels)
+
+    // 画线：相邻枢轴点两两连接
+    if pvCount > 1
+        for i = 1 to pvCount - 1
+            t1 = array.get(cPvTime, i - 1)
+            p1 = array.get(cPvPrice, i - 1)
+            t2 = array.get(cPvTime, i)
+            p2 = array.get(cPvPrice, i)
+            isUp = array.get(cPvType, i) == 'High'
+            lColor = isUp ? loColor : hiColor
+            array.push(pvLines, line.new(t1, p1, t2, p2, xloc=xloc.bar_time, color=lColor, width=lineW))
+
+    // 标签
+    if showLbl and pvCount > 0
+        for i = 0 to pvCount - 1
+            t = array.get(cPvTime, i)
+            p = array.get(cPvPrice, i)
+            isHigh = array.get(cPvType, i) == 'High'
+            lblStyle = isHigh ? label.style_label_down : label.style_label_up
+            lblColor = isHigh ? hiColor : loColor
+            txt = (isHigh ? 'H' : 'L') + '\n' + str.tostring(p, format.mintick)
+            array.push(pvLabels, label.new(t, p, txt, xloc=xloc.bar_time, style=lblStyle, size=size.small, color=lblColor, textcolor=color.white))
+
+    prevPvCount := pvCount
+    prevLastBar := pvLastBar
+
+// --- 潜在线：从最后拐点连到前一根 K 线 ---
+var line potLine = na
+if pvCount > 0
+    lastTime = array.get(cPvTime, pvCount - 1)
+    lastPrice = array.get(cPvPrice, pvCount - 1)
+    tgtTime = time[1]
+    tgtPrice = close[1]
+    if na(potLine)
+        potLine := line.new(lastTime, lastPrice, tgtTime, tgtPrice, xloc=xloc.bar_time, color=color.new(color.gray, 40), style=line.style_dashed, width=1)
+    else
+        line.set_xy1(potLine, lastTime, lastPrice)
+        line.set_xy2(potLine, tgtTime, tgtPrice)
+else
+    if not na(potLine)
+        line.delete(potLine)
+        potLine := na
