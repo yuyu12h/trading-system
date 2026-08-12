@@ -1,0 +1,347 @@
+//@version=5
+indicator("双顶双底识别", "DTDB", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ============================================================================
+// 1. 输入参数
+// ============================================================================
+
+pivotLen  = input.int(6, "枢轴 Lookback", minval=2, maxval=20, group="枢轴点")
+atrLen    = input.int(14, "ATR 周期", minval=5, maxval=50, group="ATR 偏差")
+atrMult   = input.float(2.0, "ATR 偏差倍数", minval=0.5, maxval=10.0, step=0.1, group="ATR 偏差")
+searchWin = input.int(5, "弹性搜索窗口", minval=3, maxval=10, group="弹性搜索")
+strictMode = input.bool(true, "严格模式", tooltip="中间回撤点必须是枢轴低点/高点", group="形态设置")
+maxPendingBars = input.int(200, "待确认超时 (bar)", minval=50, maxval=1000, tooltip="超过此bar数颈线未突破则放弃该候选", group="形态设置")
+
+// ============================================================================
+// 2. ATR
+// ============================================================================
+
+atrValue = ta.atr(atrLen)
+
+// ============================================================================
+// 3. 枢轴点检测
+// ============================================================================
+
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+// ============================================================================
+// 4. 类型定义
+// ============================================================================
+
+type Pivot
+    int bar
+    int t
+    float price
+
+type Candidate
+    int   top1Bar
+    float top1Price
+    int   top1Time
+    int   top2Bar
+    float top2Price
+    int   top2Time
+    float neckPrice
+    bool  isDoubleTop
+
+// ============================================================================
+// 5. 持久存储
+// ============================================================================
+
+var Pivot[]     phArr      = array.new<Pivot>()
+var Pivot[]     plArr      = array.new<Pivot>()
+var Candidate[] pending    = array.new<Candidate>()
+var int[]       drawnKeys  = array.new<int>()
+var line[]      drawnLines = array.new<line>()
+var label[]     drawnLabels = array.new<label>()
+
+// ============================================================================
+// 6. 辅助函数
+// ============================================================================
+
+isSkippable(float pkPrice, float piPrice, float pjPrice, float refAtr) =>
+    math.abs(pkPrice - piPrice) > refAtr and math.abs(pkPrice - pjPrice) > refAtr
+
+findLowestBetween(int bar1, int bar2) =>
+    offset1 = bar_index - bar1
+    offset2 = bar_index - bar2
+    float lo = 1e20
+    int loBar = 0
+    for i = offset2 to offset1
+        if low[i] < lo
+            lo := low[i]
+            loBar := bar_index - i
+    [lo, loBar]
+
+findHighestBetween(int bar1, int bar2) =>
+    offset1 = bar_index - bar1
+    offset2 = bar_index - bar2
+    float hi = -1e20
+    int hiBar = 0
+    for i = offset2 to offset1
+        if high[i] > hi
+            hi := high[i]
+            hiBar := bar_index - i
+    [hi, hiBar]
+
+isRecordedPivotLow(int barIdx) =>
+    result = false
+    sz = array.size(plArr)
+    if sz > 0
+        for i = 0 to sz - 1
+            if array.get(plArr, i).bar == barIdx
+                result := true
+                break
+    result
+
+isRecordedPivotHigh(int barIdx) =>
+    result = false
+    sz = array.size(phArr)
+    if sz > 0
+        for i = 0 to sz - 1
+            if array.get(phArr, i).bar == barIdx
+                result := true
+                break
+    result
+
+makeKey(int bar1, int bar2, bool isTop) =>
+    key = bar1 * 100000 + bar2
+    if not isTop
+        key := key + 10000000
+    key
+
+isAlreadyDrawn(int key) =>
+    found = false
+    sz = array.size(drawnKeys)
+    if sz > 0
+        for i = 0 to sz - 1
+            if array.get(drawnKeys, i) == key
+                found := true
+                break
+    found
+
+// ============================================================================
+// 7. 双顶搜索（无 return，用 if 嵌套替代早期退出）
+// ============================================================================
+
+searchDoubleTop() =>
+    sz = array.size(phArr)
+    if sz >= 2
+        pivotBar   = bar_index - pivotLen
+        pivotPrice = high[pivotLen]
+        pivotTime  = time[pivotLen]
+
+        curAtr = atrValue
+        if not na(curAtr) and curAtr > 0
+            tolerance = atrMult * curAtr
+
+            for j = 1 to sz - 1
+                oldPivot = array.get(phArr, j)
+                oldBar   = oldPivot.bar
+                oldPrice = oldPivot.price
+                oldTime  = oldPivot.t
+
+                if math.abs(pivotPrice - oldPrice) > tolerance
+                    continue
+
+                patternHigh = math.max(oldPrice, pivotPrice)
+                intermediatesSkippable = true
+                if j > 1
+                    for k = 1 to j - 1
+                        mid = array.get(phArr, k)
+                        if mid.bar > oldBar and mid.bar < pivotBar
+                            if not isSkippable(mid.price, oldPrice, pivotPrice, tolerance)
+                                intermediatesSkippable := false
+                                break
+                            // 被跳过的毛刺不能高于双顶的最高值（否则阻力已被突破）
+                            if mid.price > patternHigh
+                                intermediatesSkippable := false
+                                break
+                if not intermediatesSkippable
+                    continue
+
+                [midLow, midLowBar] = findLowestBetween(oldBar, pivotBar)
+
+                if strictMode
+                    if not isRecordedPivotLow(midLowBar)
+                        continue
+
+                cand = Candidate.new(oldBar, oldPrice, oldTime, pivotBar, pivotPrice, pivotTime, midLow, true)
+                array.push(pending, cand)
+
+// ============================================================================
+// 8. 双底搜索
+// ============================================================================
+
+searchDoubleBottom() =>
+    sz = array.size(plArr)
+    if sz >= 2
+        pivotBar   = bar_index - pivotLen
+        pivotPrice = low[pivotLen]
+        pivotTime  = time[pivotLen]
+
+        curAtr = atrValue
+        if not na(curAtr) and curAtr > 0
+            tolerance = atrMult * curAtr
+
+            for j = 1 to sz - 1
+                oldPivot = array.get(plArr, j)
+                oldBar   = oldPivot.bar
+                oldPrice = oldPivot.price
+                oldTime  = oldPivot.t
+
+                if math.abs(pivotPrice - oldPrice) > tolerance
+                    continue
+
+                patternLow = math.min(oldPrice, pivotPrice)
+                intermediatesSkippable = true
+                if j > 1
+                    for k = 1 to j - 1
+                        mid = array.get(plArr, k)
+                        if mid.bar > oldBar and mid.bar < pivotBar
+                            if not isSkippable(mid.price, oldPrice, pivotPrice, tolerance)
+                                intermediatesSkippable := false
+                                break
+                            // 被跳过的毛刺不能低于双底的最低值（否则支撑已被跌破）
+                            if mid.price < patternLow
+                                intermediatesSkippable := false
+                                break
+                if not intermediatesSkippable
+                    continue
+
+                [midHigh, midHighBar] = findHighestBetween(oldBar, pivotBar)
+
+                if strictMode
+                    if not isRecordedPivotHigh(midHighBar)
+                        continue
+
+                cand = Candidate.new(oldBar, oldPrice, oldTime, pivotBar, pivotPrice, pivotTime, midHigh, false)
+                array.push(pending, cand)
+
+// ============================================================================
+// 9. 绘制函数（必须在 confirmAndDraw 之前定义）
+// ============================================================================
+
+drawPattern(Candidate cand) =>
+    isTop    = cand.isDoubleTop
+    neckCol  = isTop ? color.new(#e53935, 20) : color.new(#43a047, 20)
+    markCol  = isTop ? #e53935 : #43a047
+    markTxt  = isTop ? "▼" : "▲"
+    nameTxt  = isTop ? "双顶" : "双底"
+    nameCol  = isTop ? #e53935 : #43a047
+
+    nl = line.new(cand.top1Time, cand.neckPrice, cand.top2Time, cand.neckPrice, xloc=xloc.bar_time, extend=extend.right, color=neckCol, width=2, style=line.style_dashed)
+    array.push(drawnLines, nl)
+
+    m1 = label.new(cand.top1Time, cand.top1Price, markTxt, xloc=xloc.bar_time, color=markCol, textcolor=color.white, style=label.style_label_down, size=size.small)
+    array.push(drawnLabels, m1)
+
+    m2 = label.new(cand.top2Time, cand.top2Price, markTxt, xloc=xloc.bar_time, color=markCol, textcolor=color.white, style=label.style_label_down, size=size.small)
+    array.push(drawnLabels, m2)
+
+    lb = label.new(cand.top2Time, cand.neckPrice, nameTxt, xloc=xloc.bar_time, color=color.new(color.black, 80), textcolor=nameCol, style=label.style_label_center, size=size.normal)
+    array.push(drawnLabels, lb)
+
+// ============================================================================
+// 10. 确认 & 绘制
+// ============================================================================
+
+confirmAndDraw() =>
+    pendSz = array.size(pending)
+    if pendSz > 0
+        int[] toRemove = array.new<int>()
+
+        for i = 0 to pendSz - 1
+            cand = array.get(pending, i)
+            age = bar_index - cand.top2Bar
+
+            // 超时清理: 超过 maxPendingBars 仍未确认 → 放弃
+            if age > maxPendingBars
+                array.push(toRemove, i)
+                continue
+
+            lookback = math.min(age, 500)
+            confirmed = false
+            invalidated = false
+
+            if cand.isDoubleTop
+                // 失效条件: 突破颈线前先涨过了两个顶的最高点
+                invalLevel = math.max(cand.top1Price, cand.top2Price)
+                // 从 top2Bar (最旧) 向当前 bar (最新) 遍历，先发生的条件优先
+                o = lookback
+                while o >= 0 and not confirmed and not invalidated
+                    if high[o] > invalLevel
+                        invalidated := true
+                    if low[o] <= cand.neckPrice
+                        confirmed := true
+                    o := o - 1
+            else
+                // 失效条件: 突破颈线前先跌破了两个底的最低点
+                invalLevel = math.min(cand.top1Price, cand.top2Price)
+                o = lookback
+                while o >= 0 and not confirmed and not invalidated
+                    if low[o] < invalLevel
+                        invalidated := true
+                    if high[o] >= cand.neckPrice
+                        confirmed := true
+                    o := o - 1
+
+            if invalidated
+                array.push(toRemove, i)
+                continue
+
+            if confirmed
+                key = makeKey(cand.top1Bar, cand.top2Bar, cand.isDoubleTop)
+                if not isAlreadyDrawn(key)
+                    drawPattern(cand)
+                    array.push(drawnKeys, key)
+                array.push(toRemove, i)
+
+        rmSz = array.size(toRemove)
+        if rmSz > 0
+            idx = rmSz - 1
+            while idx >= 0
+                array.remove(pending, array.get(toRemove, idx))
+                idx := idx - 1
+
+// ============================================================================
+// 11. 主逻辑
+// ============================================================================
+
+if not na(ph)
+    pivotBar = bar_index - pivotLen
+    newPivot = Pivot.new(pivotBar, time[pivotLen], high[pivotLen])
+    array.unshift(phArr, newPivot)
+    if array.size(phArr) > searchWin
+        array.pop(phArr)
+    searchDoubleTop()
+
+if not na(pl)
+    pivotBar = bar_index - pivotLen
+    newPivot = Pivot.new(pivotBar, time[pivotLen], low[pivotLen])
+    array.unshift(plArr, newPivot)
+    if array.size(plArr) > searchWin
+        array.pop(plArr)
+    searchDoubleBottom()
+
+confirmAndDraw()
+
+// ============================================================================
+// 12. 首次加载清理
+// ============================================================================
+
+if barstate.isfirst
+    lineSz = array.size(drawnLines)
+    if lineSz > 0
+        for i = 0 to lineSz - 1
+            line.delete(array.get(drawnLines, i))
+        array.clear(drawnLines)
+
+    labelSz = array.size(drawnLabels)
+    if labelSz > 0
+        for i = 0 to labelSz - 1
+            label.delete(array.get(drawnLabels, i))
+        array.clear(drawnLabels)
+
+    array.clear(drawnKeys)
+    array.clear(pending)
