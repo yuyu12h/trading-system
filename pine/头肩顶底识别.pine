@@ -1,0 +1,463 @@
+//@version=5
+indicator("头肩顶底识别", "HSTB", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ============================================================================
+// 1. 输入参数
+// ============================================================================
+
+pivotLen  = input.int(6, "枢轴 Lookback", minval=2, maxval=20, group="枢轴点")
+atrLen    = input.int(14, "ATR 周期", minval=5, maxval=50, group="ATR 偏差")
+atrMult   = input.float(1.0, "颈线偏差倍数", minval=0.2, maxval=5.0, step=0.1, tooltip="两颈线点的价格差距容忍度", group="ATR 偏差")
+searchWin = input.int(7, "弹性搜索窗口", minval=3, maxval=15, group="弹性搜索")
+strictMode = input.bool(true, "严格模式", tooltip="颈线点必须是枢轴低点/高点", group="形态设置")
+maxPendingBars = input.int(200, "待确认超时 (bar)", minval=50, maxval=1000, tooltip="超过此bar数颈线未突破则放弃该候选", group="形态设置")
+headShoulderDiff = input.float(3.0, "肩头差距倍数", minval=0.5, maxval=10.0, step=0.5, tooltip="头与两肩的价格差距不能超过此倍数×ATR", group="形态设置")
+
+// ============================================================================
+// 2. ATR
+// ============================================================================
+
+atrValue = ta.atr(atrLen)
+
+// ============================================================================
+// 3. 枢轴点检测
+// ============================================================================
+
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+// ============================================================================
+// 4. 类型定义
+// ============================================================================
+
+type Pivot
+    int bar
+    int t
+    float price
+
+type Candidate
+    int   s1Bar
+    float s1Price
+    int   s1Time
+    int   headBar
+    float headPrice
+    int   headTime
+    int   s2Bar
+    float s2Price
+    int   s2Time
+    float neck1Price
+    int   neck1Bar
+    int   neck1Time
+    float neck2Price
+    int   neck2Bar
+    int   neck2Time
+    bool  isTop
+
+// ============================================================================
+// 5. 持久存储
+// ============================================================================
+
+var Pivot[]     phArr      = array.new<Pivot>()
+var Pivot[]     plArr      = array.new<Pivot>()
+var Candidate[] pending    = array.new<Candidate>()
+var int[]       drawnKeys  = array.new<int>()
+var int[]       processedHeads = array.new<int>()
+var line[]      drawnLines = array.new<line>()
+var label[]     drawnLabels = array.new<label>()
+
+// ============================================================================
+// 6. 辅助函数
+// ============================================================================
+
+// 找两 bar 之间的最低点 (返回 [price, bar, time])
+getMidLow(int bar1, int bar2, bool useStrict) =>
+    float bestPrice = 1e20
+    int   bestBar   = -1
+    int   bestTime  = 0
+    if useStrict
+        sz = array.size(plArr)
+        if sz > 0
+            for i = 0 to sz - 1
+                p = array.get(plArr, i)
+                if p.bar > bar1 and p.bar < bar2 and p.price < bestPrice
+                    bestPrice := p.price
+                    bestBar := p.bar
+                    bestTime := p.t
+    else
+        offset1 = bar_index - bar1
+        offset2 = bar_index - bar2
+        for i = offset2 to offset1
+            if low[i] < bestPrice
+                bestPrice := low[i]
+                bestBar := bar_index - i
+                bestTime := time[i]
+    [bestPrice, bestBar, bestTime]
+
+// 找两 bar 之间的最高点 (返回 [price, bar, time])
+getMidHigh(int bar1, int bar2, bool useStrict) =>
+    float bestPrice = -1e20
+    int   bestBar   = -1
+    int   bestTime  = 0
+    if useStrict
+        sz = array.size(phArr)
+        if sz > 0
+            for i = 0 to sz - 1
+                p = array.get(phArr, i)
+                if p.bar > bar1 and p.bar < bar2 and p.price > bestPrice
+                    bestPrice := p.price
+                    bestBar := p.bar
+                    bestTime := p.t
+    else
+        offset1 = bar_index - bar1
+        offset2 = bar_index - bar2
+        for i = offset2 to offset1
+            if high[i] > bestPrice
+                bestPrice := high[i]
+                bestBar := bar_index - i
+                bestTime := time[i]
+    [bestPrice, bestBar, bestTime]
+
+// 颈线投影: 颈线从 neck1 连到 neck2, 向右延伸投影到 bar b
+projectNeckline(Candidate cand, int b) =>
+    span = cand.neck2Bar - cand.neck1Bar
+    float proj = cand.neck1Price
+    if span > 0
+        proj := cand.neck1Price + (cand.neck2Price - cand.neck1Price) * (b - cand.neck1Bar) / span
+    proj
+
+makeKey(int bar1, int bar2, bool isTop) =>
+    key = bar1 * 100000 + bar2
+    if not isTop
+        key := key + 10000000
+    key
+
+isAlreadyDrawn(int key) =>
+    found = false
+    sz = array.size(drawnKeys)
+    if sz > 0
+        for i = 0 to sz - 1
+            if array.get(drawnKeys, i) == key
+                found := true
+                break
+    found
+
+// 检查这个头(同方向)是否已经生成过候选, 用于右肩去重
+headAlreadyProcessed(int headBar, bool isTop) =>
+    key = headBar * 2 + (isTop ? 1 : 0)
+    found = false
+    sz = array.size(processedHeads)
+    if sz > 0
+        for i = 0 to sz - 1
+            if array.get(processedHeads, i) == key
+                found := true
+                break
+    found
+
+// ============================================================================
+// 7. 头肩顶搜索
+// ============================================================================
+
+searchHSTop() =>
+    sz = array.size(phArr)
+    if sz >= 3
+        s2Bar   = bar_index - pivotLen
+        s2Price = high[pivotLen]
+        s2Time  = time[pivotLen]
+
+        curAtr = atrValue
+        if not na(curAtr) and curAtr > 0
+            tolerance = atrMult * curAtr
+
+            // j: 头 H2 (必须高于右肩)
+            for j = 1 to sz - 2
+                h2 = array.get(phArr, j)
+                if h2.price <= s2Price
+                    continue
+
+                // 检查 H3~H2 之间被跳过的毛刺不高于头
+                midOk = true
+                if j > 1
+                    for m = 1 to j - 1
+                        mid = array.get(phArr, m)
+                        if mid.price > h2.price
+                            midOk := false
+                            break
+                if not midOk
+                    continue
+
+                // 右肩去重: 同一个头只保留离头最近的右肩
+                if headAlreadyProcessed(h2.bar, true)
+                    continue
+
+                // 左肩: 从头之前最近开始, 找到第一个满足颈线差距的
+                for k = j + 1 to sz - 1
+                    h1 = array.get(phArr, k)
+                    if h2.price <= h1.price
+                        continue
+
+                    // 检查 H2~H1 之间被跳过的毛刺不高于头
+                    midOk2 = true
+                    if k > j + 1
+                        for m = j + 1 to k - 1
+                            mid = array.get(phArr, m)
+                            if mid.price > h2.price
+                                midOk2 := false
+                                break
+                    if not midOk2
+                        continue
+
+                    // 颈线点1: H1~H2 之间的最低点
+                    [neck1Price, neck1Bar, neck1Time] = getMidLow(h1.bar, h2.bar, strictMode)
+                    if strictMode and neck1Bar < 0
+                        continue
+
+                    // 颈线点2: H2~H3 之间的最低点
+                    [neck2Price, neck2Bar, neck2Time] = getMidLow(h2.bar, s2Bar, strictMode)
+                    if strictMode and neck2Bar < 0
+                        continue
+
+                    // 颈线两点差距不超过 ATR × atrMult
+                    if math.abs(neck1Price - neck2Price) > tolerance
+                        continue
+
+                    // 肩头差距: 头与左肩/右肩的差距不超过 headShoulderDiff × ATR
+                    if h2.price - h1.price > headShoulderDiff * curAtr
+                        continue
+                    if h2.price - s2Price > headShoulderDiff * curAtr
+                        continue
+
+                    cand = Candidate.new(h1.bar, h1.price, h1.t, h2.bar, h2.price, h2.t, s2Bar, s2Price, s2Time, neck1Price, neck1Bar, neck1Time, neck2Price, neck2Bar, neck2Time, true)
+                    array.push(pending, cand)
+
+// ============================================================================
+// 8. 头肩底搜索
+// ============================================================================
+
+searchHSBottom() =>
+    sz = array.size(plArr)
+    if sz >= 3
+        s2Bar   = bar_index - pivotLen
+        s2Price = low[pivotLen]
+        s2Time  = time[pivotLen]
+
+        curAtr = atrValue
+        if not na(curAtr) and curAtr > 0
+            tolerance = atrMult * curAtr
+
+            // j: 头 L2 (必须低于右肩)
+            for j = 1 to sz - 2
+                l2 = array.get(plArr, j)
+                if l2.price >= s2Price
+                    continue
+
+                // 检查 L3~L2 之间被跳过的毛刺不低于头
+                midOk = true
+                if j > 1
+                    for m = 1 to j - 1
+                        mid = array.get(plArr, m)
+                        if mid.price < l2.price
+                            midOk := false
+                            break
+                if not midOk
+                    continue
+
+                // 右肩去重: 同一个头只保留离头最近的右肩
+                if headAlreadyProcessed(l2.bar, false)
+                    continue
+
+                // 左肩: 从头之前最近开始, 找到第一个满足颈线差距的
+                for k = j + 1 to sz - 1
+                    l1 = array.get(plArr, k)
+                    if l2.price >= l1.price
+                        continue
+
+                    // 检查 L2~L1 之间被跳过的毛刺不低于头
+                    midOk2 = true
+                    if k > j + 1
+                        for m = j + 1 to k - 1
+                            mid = array.get(plArr, m)
+                            if mid.price < l2.price
+                                midOk2 := false
+                                break
+                    if not midOk2
+                        continue
+
+                    // 颈线点1: L1~L2 之间的最高点
+                    [neck1Price, neck1Bar, neck1Time] = getMidHigh(l1.bar, l2.bar, strictMode)
+                    if strictMode and neck1Bar < 0
+                        continue
+
+                    // 颈线点2: L2~L3 之间的最高点
+                    [neck2Price, neck2Bar, neck2Time] = getMidHigh(l2.bar, s2Bar, strictMode)
+                    if strictMode and neck2Bar < 0
+                        continue
+
+                    // 颈线两点差距不超过 ATR × atrMult
+                    if math.abs(neck1Price - neck2Price) > tolerance
+                        continue
+
+                    // 肩头差距: 头与左肩/右肩的差距不超过 headShoulderDiff × ATR
+                    if l1.price - l2.price > headShoulderDiff * curAtr
+                        continue
+                    if s2Price - l2.price > headShoulderDiff * curAtr
+                        continue
+
+                    cand = Candidate.new(l1.bar, l1.price, l1.t, l2.bar, l2.price, l2.t, s2Bar, s2Price, s2Time, neck1Price, neck1Bar, neck1Time, neck2Price, neck2Bar, neck2Time, false)
+                    array.push(pending, cand)
+
+// ============================================================================
+// 9. 绘制函数
+// ============================================================================
+
+drawPattern(Candidate cand, int confirmTime, float confirmPrice) =>
+    isTop    = cand.isTop
+    neckCol  = isTop ? color.new(#e53935, 20) : color.new(#43a047, 20)
+    markCol  = isTop ? #e53935 : #43a047
+    outlineCol = isTop ? color.new(#e53935, 40) : color.new(#43a047, 40)
+    markTxt  = isTop ? "▼" : "▲"
+    nameTxt  = isTop ? "头肩顶" : "头肩底"
+    nameCol  = isTop ? #e53935 : #43a047
+
+    // 轮廓连线: 左肩 → 颈线点1 → 头 → 颈线点2 → 右肩
+    l1 = line.new(cand.s1Time, cand.s1Price, cand.neck1Time, cand.neck1Price, xloc=xloc.bar_time, color=outlineCol, width=1)
+    array.push(drawnLines, l1)
+    l2 = line.new(cand.neck1Time, cand.neck1Price, cand.headTime, cand.headPrice, xloc=xloc.bar_time, color=outlineCol, width=1)
+    array.push(drawnLines, l2)
+    l3 = line.new(cand.headTime, cand.headPrice, cand.neck2Time, cand.neck2Price, xloc=xloc.bar_time, color=outlineCol, width=1)
+    array.push(drawnLines, l3)
+    l4 = line.new(cand.neck2Time, cand.neck2Price, cand.s2Time, cand.s2Price, xloc=xloc.bar_time, color=outlineCol, width=1)
+    array.push(drawnLines, l4)
+
+    // 颈线: 从颈线点1 延伸到突破那根 K 线
+    nl = line.new(cand.neck1Time, cand.neck1Price, confirmTime, confirmPrice, xloc=xloc.bar_time, color=neckCol, width=2, style=line.style_dashed)
+    array.push(drawnLines, nl)
+
+    m1 = label.new(cand.s1Time, cand.s1Price, markTxt, xloc=xloc.bar_time, color=markCol, textcolor=color.white, style=label.style_label_down, size=size.small)
+    array.push(drawnLabels, m1)
+
+    mh = label.new(cand.headTime, cand.headPrice, "头", xloc=xloc.bar_time, color=markCol, textcolor=color.white, style=label.style_label_down, size=size.small)
+    array.push(drawnLabels, mh)
+
+    m2 = label.new(cand.s2Time, cand.s2Price, markTxt, xloc=xloc.bar_time, color=markCol, textcolor=color.white, style=label.style_label_down, size=size.small)
+    array.push(drawnLabels, m2)
+
+    lb = label.new(cand.s2Time, cand.neck2Price, nameTxt, xloc=xloc.bar_time, color=color.new(color.black, 80), textcolor=nameCol, style=label.style_label_center, size=size.normal)
+    array.push(drawnLabels, lb)
+
+// ============================================================================
+// 10. 确认 & 绘制
+// ============================================================================
+
+confirmAndDraw() =>
+    pendSz = array.size(pending)
+    if pendSz > 0
+        int[] toRemove = array.new<int>()
+
+        for i = 0 to pendSz - 1
+            cand = array.get(pending, i)
+            age = bar_index - cand.s2Bar
+
+            // 超时清理: 超过 maxPendingBars 仍未确认 → 放弃
+            if age > maxPendingBars
+                array.push(toRemove, i)
+                continue
+
+            lookback = math.min(age, 500)
+            confirmed = false
+            invalidated = false
+            confirmTime = 0
+            confirmPrice = 0.0
+
+            if cand.isTop
+                // 失效条件: 突破右肩最高点; 确认: 跌破颈线投影
+                invalLevel = cand.s2Price
+                o = lookback
+                proj = cand.neck2Price
+                while o >= 0 and not confirmed and not invalidated
+                    if high[o] > invalLevel
+                        invalidated := true
+                    proj := projectNeckline(cand, bar_index - o)
+                    if low[o] <= proj
+                        confirmed := true
+                        confirmTime := time[o]
+                        confirmPrice := proj
+                    o := o - 1
+            else
+                // 失效条件: 跌破右肩最低点; 确认: 突破颈线投影
+                invalLevel = cand.s2Price
+                o = lookback
+                proj = cand.neck2Price
+                while o >= 0 and not confirmed and not invalidated
+                    if low[o] < invalLevel
+                        invalidated := true
+                    proj := projectNeckline(cand, bar_index - o)
+                    if high[o] >= proj
+                        confirmed := true
+                        confirmTime := time[o]
+                        confirmPrice := proj
+                    o := o - 1
+
+            if invalidated
+                array.push(toRemove, i)
+                continue
+
+            if confirmed
+                if headAlreadyProcessed(cand.headBar, cand.isTop)
+                    // 头已确认过(同头多左肩候选), 跳过
+                    array.push(toRemove, i)
+                else
+                    key = makeKey(cand.s1Bar, cand.s2Bar, cand.isTop)
+                    if not isAlreadyDrawn(key)
+                        drawPattern(cand, confirmTime, confirmPrice)
+                        array.push(drawnKeys, key)
+                    array.push(processedHeads, cand.headBar * 2 + (cand.isTop ? 1 : 0))
+                    array.push(toRemove, i)
+
+        rmSz = array.size(toRemove)
+        if rmSz > 0
+            idx = rmSz - 1
+            while idx >= 0
+                array.remove(pending, array.get(toRemove, idx))
+                idx := idx - 1
+
+// ============================================================================
+// 11. 主逻辑
+// ============================================================================
+
+if not na(ph)
+    pivotBar = bar_index - pivotLen
+    newPivot = Pivot.new(pivotBar, time[pivotLen], high[pivotLen])
+    array.unshift(phArr, newPivot)
+    if array.size(phArr) > searchWin
+        array.pop(phArr)
+    searchHSTop()
+
+if not na(pl)
+    pivotBar = bar_index - pivotLen
+    newPivot = Pivot.new(pivotBar, time[pivotLen], low[pivotLen])
+    array.unshift(plArr, newPivot)
+    if array.size(plArr) > searchWin
+        array.pop(plArr)
+    searchHSBottom()
+
+confirmAndDraw()
+
+// ============================================================================
+// 12. 首次加载清理
+// ============================================================================
+
+if barstate.isfirst
+    lineSz = array.size(drawnLines)
+    if lineSz > 0
+        for i = 0 to lineSz - 1
+            line.delete(array.get(drawnLines, i))
+        array.clear(drawnLines)
+
+    labelSz = array.size(drawnLabels)
+    if labelSz > 0
+        for i = 0 to labelSz - 1
+            label.delete(array.get(drawnLabels, i))
+        array.clear(drawnLabels)
+
+    array.clear(drawnKeys)
+    array.clear(pending)
