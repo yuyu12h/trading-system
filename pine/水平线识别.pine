@@ -1,0 +1,127 @@
+//@version=5
+indicator('水平线识别', 'HorizLine', true, max_lines_count=500, max_bars_back=5000)
+
+// ===================================================================
+// 参数
+// ===================================================================
+pivotLeft  = input.int(10, '枢轴点左侧 K 线数', minval=2, group='枢轴点')
+pivotRight = input.int(10, '枢轴点右侧 K 线数', minval=2, group='枢轴点')
+maxPivots  = input.int(50, '保留枢轴点数量', minval=10, maxval=100, group='枢轴点')
+atrLen     = input.int(14, 'ATR 周期', minval=5, maxval=50, group='水平容差')
+atrMult    = input.float(1.0, '水平容差倍数', minval=0.2, maxval=5.0, step=0.1, group='水平容差')
+pairCount  = input.int(8, '往前回看枢轴点数量', minval=2, maxval=12, group='水平线')
+
+showResist  = input.bool(true, '水平阻力线', group='显示')
+showSupport = input.bool(true, '水平支撑线', group='显示')
+resistColor = input.color(color.new(color.red, 0), '阻力线颜色', group='显示')
+supportColor = input.color(color.new(color.teal, 0), '支撑线颜色', group='显示')
+lineW       = input.int(2, '线宽', minval=1, maxval=4, group='显示')
+
+// ===================================================================
+// ATR
+// ===================================================================
+atr = ta.atr(atrLen)
+
+// ===================================================================
+// 枢轴点检测
+// ===================================================================
+phPrice = ta.pivothigh(high, pivotLeft, pivotRight)
+plPrice = ta.pivotlow(low, pivotLeft, pivotRight)
+
+// ===================================================================
+// 枢轴点序列
+// ===================================================================
+var phBar  = array.new<int>()
+var phTime = array.new<int>()
+var phHigh = array.new<float>()
+
+var plBar  = array.new<int>()
+var plTime = array.new<int>()
+var plLow  = array.new<float>()
+
+var line[] tlLines = array.new<line>()
+
+// ===================================================================
+// 水平阻力线（连高点）
+//   新高点 C → 往前找高点 A → |A-C| ≤ ATR → 水平线
+// ===================================================================
+if not na(phPrice) and showResist
+    pBar = bar_index - pivotRight
+    array.push(phBar, pBar)
+    array.push(phTime, time[pivotRight])
+    array.push(phHigh, phPrice)
+
+    if array.size(phBar) > maxPivots
+        array.shift(phBar)
+        array.shift(phTime)
+        array.shift(phHigh)
+
+    cIdx  = array.size(phBar) - 1
+    barC  = array.get(phBar, cIdx)
+    highC = array.get(phHigh, cIdx)
+    timeC = array.get(phTime, cIdx)
+
+    tol = atrMult * atr
+    if not na(tol) and tol > 0
+        for aOff = 1 to pairCount
+            aIdx = cIdx - aOff
+            if aIdx < 0
+                break
+
+            barA  = array.get(phBar, aIdx)
+            highA = array.get(phHigh, aIdx)
+            timeA = array.get(phTime, aIdx)
+
+            // 同一水平：|A - C| ≤ ATR
+            if math.abs(highA - highC) <= tol
+                level = math.max(highA, highC)
+                // 中间约束：A 到 C 之间的枢轴高点不突破水平价位
+                midOk = true
+                for mIdx = aIdx + 1 to cIdx - 1
+                    if array.get(phHigh, mIdx) > level + tol
+                        midOk := false
+                        break
+                if midOk and array.size(tlLines) < 499
+                    array.push(tlLines, line.new(timeA, level, timeC, level, xloc=xloc.bar_time, color=resistColor, width=lineW))
+
+// ===================================================================
+// 水平支撑线（连低点）
+// ===================================================================
+if not na(plPrice) and showSupport
+    pBar = bar_index - pivotRight
+    array.push(plBar, pBar)
+    array.push(plTime, time[pivotRight])
+    array.push(plLow, plPrice)
+
+    if array.size(plBar) > maxPivots
+        array.shift(plBar)
+        array.shift(plTime)
+        array.shift(plLow)
+
+    cIdx = array.size(plBar) - 1
+    barC = array.get(plBar, cIdx)
+    lowC = array.get(plLow, cIdx)
+    timeC = array.get(plTime, cIdx)
+
+    tol = atrMult * atr
+    if not na(tol) and tol > 0
+        for aOff = 1 to pairCount
+            aIdx = cIdx - aOff
+            if aIdx < 0
+                break
+
+            barA = array.get(plBar, aIdx)
+            lowA = array.get(plLow, aIdx)
+            timeA = array.get(plTime, aIdx)
+
+            // 同一水平：|A - C| ≤ ATR
+            if math.abs(lowA - lowC) <= tol
+                level = math.min(lowA, lowC)
+                // 中间约束：A 到 C 之间的枢轴低点不跌破水平价位
+                midOk = true
+                for mIdx = aIdx + 1 to cIdx - 1
+                    if array.get(plLow, mIdx) < level - tol
+                        midOk := false
+                        break
+                if midOk and array.size(tlLines) < 499
+                    array.push(tlLines, line.new(timeA, level, timeC, level, xloc=xloc.bar_time, color=supportColor, width=lineW))
