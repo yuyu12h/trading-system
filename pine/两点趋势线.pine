@@ -1,0 +1,317 @@
+//@version=5
+indicator('两点趋势线', 'TwoPointTL', true, max_lines_count=500, max_bars_back=5000)
+
+// ===================================================================
+// 参数
+// ===================================================================
+pivotLeft  = input.int(10, '枢轴点左侧 K 线数', minval=2, group='枢轴点')
+pivotRight = input.int(10, '枢轴点右侧 K 线数', minval=2, group='枢轴点')
+maxPivots  = input.int(50, '保留枢轴点数量', minval=10, maxval=100, group='枢轴点')
+pairCount  = input.int(4, '前 N 个枢轴点配对', minval=2, maxval=6, group='趋势线')
+maxSpan    = input.int(400, '相邻触点最大间隔 K 线数', minval=50, maxval=1000, group='趋势线')
+
+showUpLines = input.bool(true, '上升趋势线', group='显示')
+showDnLines = input.bool(true, '下降趋势线', group='显示')
+upColor     = input.color(color.new(color.teal, 0), '上升趋势线颜色', group='显示')
+dnColor     = input.color(color.new(color.red, 0), '下降趋势线颜色', group='显示')
+lineW       = input.int(2, '线宽', minval=1, maxval=4, group='显示')
+
+// ===================================================================
+// 枢轴点检测
+// ===================================================================
+phPrice = ta.pivothigh(high, pivotLeft, pivotRight)
+plPrice = ta.pivotlow(low, pivotLeft, pivotRight)
+
+// ===================================================================
+// 枢轴点序列 + 影线范围
+//   高点 → 上影线 [u, high]，u = max(open, close)
+//   低点 → 下影线 [low, l]，l = min(open, close)
+// ===================================================================
+var phBar  = array.new<int>()
+var phTime = array.new<int>()
+var phHigh = array.new<float>()
+var phU    = array.new<float>()
+
+var plBar  = array.new<int>()
+var plTime = array.new<int>()
+var plLow  = array.new<float>()
+var plL    = array.new<float>()
+
+var line[] tlLines = array.new<line>()
+
+var int[] candA = array.new<int>()
+
+// ===================================================================
+// 函数：三点共线判定（影线无极调节）
+// ===================================================================
+canAlign(barA, loA, hiA, barB, loB, hiB, barC, loC, hiC) =>
+    k = (barA - barB) / (barC - barB)
+    yA_lo = loB * (1 - k) + hiC * k
+    yA_hi = hiB * (1 - k) + loC * k
+    yA_lo <= hiA and yA_hi >= loA
+
+// ===================================================================
+// 函数：取可行解（高点，影线 [u, high]）
+// ===================================================================
+getLineHigh(barA, uA, highA, barB, uB, highB, barC, uC, highC) =>
+    t = (barB - barA) / (barC - barA)
+    yA = highA
+    yC = highC
+    yB = yA * (1 - t) + yC * t
+    if yB > highB
+        yB := highB
+        yA := (yB - yC * t) / (1 - t)
+        if yA < uA
+            yA := uA
+            yC := (yB - yA * (1 - t)) / t
+    [yA, yC]
+
+// ===================================================================
+// 函数：取可行解（低点，影线 [low, l]）
+// ===================================================================
+getLineLow(barA, lA, lowA, barB, lB, lowB, barC, lC, lowC) =>
+    t = (barB - barA) / (barC - barA)
+    yA = lowA
+    yC = lowC
+    yB = yA * (1 - t) + yC * t
+    if yB < lowB
+        yB := lowB
+        yA := (yB - yC * t) / (1 - t)
+        if yA > lA
+            yA := lA
+            yC := (yB - yA * (1 - t)) / t
+    [yA, yC]
+
+// ===================================================================
+// 处理新高点（连高点，去掉方向判断）
+// ===================================================================
+if not na(phPrice) and showDnLines
+    pBar = bar_index - pivotRight
+    array.push(phBar, pBar)
+    array.push(phTime, time[pivotRight])
+    array.push(phHigh, phPrice)
+    array.push(phU, math.max(open[pivotRight], close[pivotRight]))
+
+    if array.size(phBar) > maxPivots
+        array.shift(phBar)
+        array.shift(phTime)
+        array.shift(phHigh)
+        array.shift(phU)
+
+    cIdx  = array.size(phBar) - 1
+    barC  = array.get(phBar, cIdx)
+    highC = array.get(phHigh, cIdx)
+    uC    = array.get(phU, cIdx)
+    timeC = array.get(phTime, cIdx)
+
+    for bOff = 1 to pairCount
+        bIdx = cIdx - bOff
+        if bIdx < 0
+            break
+
+        barB  = array.get(phBar, bIdx)
+        highB = array.get(phHigh, bIdx)
+        uB    = array.get(phU, bIdx)
+        timeB = array.get(phTime, bIdx)
+
+        // B 到 C 之间的枢轴高点不能突破线
+        slopeBC = (highC - highB) / (barC - barB)
+        midOk = true
+        for mIdx = bIdx + 1 to cIdx - 1
+            yMid = highB + slopeBC * (array.get(phBar, mIdx) - barB)
+            if array.get(phHigh, mIdx) > yMid
+                midOk := false
+        if not midOk
+            continue
+
+        // 往前扫描，收集 canAlign 通过的候选 A
+        array.clear(candA)
+        prevTouchBar = barB
+        aIdx = bIdx - 1
+        while aIdx >= 0
+            barA  = array.get(phBar, aIdx)
+            highA = array.get(phHigh, aIdx)
+            uA    = array.get(phU, aIdx)
+
+            if canAlign(barA, uA, highA, barB, uB, highB, barC, uC, highC)
+                if prevTouchBar - barA > maxSpan
+                    break
+                array.push(candA, aIdx)
+                prevTouchBar := barA
+            else
+                yBase = highB + slopeBC * (barA - barB)
+                if highA > yBase
+                    break
+
+            aIdx := aIdx - 1
+
+        // 从远到近，找 close 约束通过的 A 画 A-C
+        drawn = false
+        candSize = array.size(candA)
+        if candSize > 0
+            for j = candSize - 1 to 0
+                aIdx2 = array.get(candA, j)
+                barA  = array.get(phBar, aIdx2)
+                highA = array.get(phHigh, aIdx2)
+                uA    = array.get(phU, aIdx2)
+                timeA = array.get(phTime, aIdx2)
+
+                // A 须是 A→B 之间的最高枢轴高点
+                okHigh = true
+                for m = aIdx2 + 1 to bIdx - 1
+                    if array.get(phHigh, m) > highA
+                        okHigh := false
+                        break
+                if okHigh
+                    [yA, yC] = getLineHigh(barA, uA, highA, barB, uB, highB, barC, uC, highC)
+                    // close 约束：A 到 C 之间收盘价不突破线
+                    slopeAC = (yC - yA) / (barC - barA)
+                    okClose = true
+                    for i = barA to barC
+                        lineVal = yA + slopeAC * (i - barA)
+                        if close[bar_index - i] > lineVal
+                            okClose := false
+                            break
+                    if okClose
+                        // 触点间隔约束
+                        prevTouch = barA
+                        okSpan = true
+                        for m = aIdx2 + 1 to bIdx - 1
+                            lineValM = yA + slopeAC * (array.get(phBar, m) - barA)
+                            if array.get(phU, m) <= lineValM and lineValM <= array.get(phHigh, m)
+                                if array.get(phBar, m) - prevTouch > maxSpan
+                                    okSpan := false
+                                    break
+                                prevTouch := array.get(phBar, m)
+                        if okSpan and barB - prevTouch <= maxSpan and array.size(tlLines) < 499
+                            array.push(tlLines, line.new(timeA, yA, timeC, yC, xloc=xloc.bar_time, color=dnColor, width=lineW))
+                            drawn := true
+                            break
+
+        // 兜底：扫不到 A，画 B-C 两点连线
+        if not drawn and array.size(tlLines) < 499
+            okCloseBC = true
+            for i = barB to barC
+                lineVal = highB + slopeBC * (i - barB)
+                if close[bar_index - i] > lineVal
+                    okCloseBC := false
+                    break
+            if okCloseBC and barC - barB <= maxSpan
+                array.push(tlLines, line.new(timeB, highB, timeC, highC, xloc=xloc.bar_time, color=dnColor, width=lineW))
+
+// ===================================================================
+// 处理新低点（连低点，去掉方向判断）
+// ===================================================================
+if not na(plPrice) and showUpLines
+    pBar = bar_index - pivotRight
+    array.push(plBar, pBar)
+    array.push(plTime, time[pivotRight])
+    array.push(plLow, plPrice)
+    array.push(plL, math.min(open[pivotRight], close[pivotRight]))
+
+    if array.size(plBar) > maxPivots
+        array.shift(plBar)
+        array.shift(plTime)
+        array.shift(plLow)
+        array.shift(plL)
+
+    cIdx = array.size(plBar) - 1
+    barC = array.get(plBar, cIdx)
+    lowC = array.get(plLow, cIdx)
+    lC   = array.get(plL, cIdx)
+    timeC = array.get(plTime, cIdx)
+
+    for bOff = 1 to pairCount
+        bIdx = cIdx - bOff
+        if bIdx < 0
+            break
+
+        barB = array.get(plBar, bIdx)
+        lowB = array.get(plLow, bIdx)
+        lB   = array.get(plL, bIdx)
+        timeB = array.get(plTime, bIdx)
+
+        // B 到 C 之间的枢轴低点不能跌破线
+        slopeBC = (lowC - lowB) / (barC - barB)
+        midOk = true
+        for mIdx = bIdx + 1 to cIdx - 1
+            yMid = lowB + slopeBC * (array.get(plBar, mIdx) - barB)
+            if array.get(plLow, mIdx) < yMid
+                midOk := false
+        if not midOk
+            continue
+
+        // 往前扫描，收集 canAlign 通过的候选 A
+        array.clear(candA)
+        prevTouchBar = barB
+        aIdx = bIdx - 1
+        while aIdx >= 0
+            barA = array.get(plBar, aIdx)
+            lowA = array.get(plLow, aIdx)
+            lA   = array.get(plL, aIdx)
+
+            if canAlign(barA, lowA, lA, barB, lowB, lB, barC, lowC, lC)
+                if prevTouchBar - barA > maxSpan
+                    break
+                array.push(candA, aIdx)
+                prevTouchBar := barA
+            else
+                yBase = lowB + slopeBC * (barA - barB)
+                if lowA < yBase
+                    break
+
+            aIdx := aIdx - 1
+
+        // 从远到近，找 close 约束通过的 A 画 A-C
+        drawn = false
+        candSize = array.size(candA)
+        if candSize > 0
+            for j = candSize - 1 to 0
+                aIdx2 = array.get(candA, j)
+                barA = array.get(plBar, aIdx2)
+                lowA = array.get(plLow, aIdx2)
+                lA   = array.get(plL, aIdx2)
+                timeA = array.get(plTime, aIdx2)
+
+                // A 须是 A→B 之间的最低枢轴低点
+                okLow = true
+                for m = aIdx2 + 1 to bIdx - 1
+                    if array.get(plLow, m) < lowA
+                        okLow := false
+                        break
+                if okLow
+                    [yA, yC] = getLineLow(barA, lA, lowA, barB, lB, lowB, barC, lC, lowC)
+                    // close 约束：A 到 C 之间收盘价不跌破线
+                    slopeAC = (yC - yA) / (barC - barA)
+                    okClose = true
+                    for i = barA to barC
+                        lineVal = yA + slopeAC * (i - barA)
+                        if close[bar_index - i] < lineVal
+                            okClose := false
+                            break
+                    if okClose
+                        // 触点间隔约束
+                        prevTouch = barA
+                        okSpan = true
+                        for m = aIdx2 + 1 to bIdx - 1
+                            lineValM = yA + slopeAC * (array.get(plBar, m) - barA)
+                            if array.get(plLow, m) <= lineValM and lineValM <= array.get(plL, m)
+                                if array.get(plBar, m) - prevTouch > maxSpan
+                                    okSpan := false
+                                    break
+                                prevTouch := array.get(plBar, m)
+                        if okSpan and barB - prevTouch <= maxSpan and array.size(tlLines) < 499
+                            array.push(tlLines, line.new(timeA, yA, timeC, yC, xloc=xloc.bar_time, color=upColor, width=lineW))
+                            drawn := true
+                            break
+
+        // 兜底：扫不到 A，画 B-C 两点连线
+        if not drawn and array.size(tlLines) < 499
+            okCloseBC = true
+            for i = barB to barC
+                lineVal = lowB + slopeBC * (i - barB)
+                if close[bar_index - i] < lineVal
+                    okCloseBC := false
+                    break
+            if okCloseBC and barC - barB <= maxSpan
+                array.push(tlLines, line.new(timeB, lowB, timeC, lowC, xloc=xloc.bar_time, color=upColor, width=lineW))
